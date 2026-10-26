@@ -103,6 +103,13 @@ def test_index_finger_beckon_comes_here(runner, clock):
     assert play(runner, clock, 2.2, frames) == ["make_sound", "come_here"]
 
 
+def test_petting_with_a_little_finger_twitch_is_not_a_beckon(runner, clock):
+    # a flat hand stroking back and forth whose extension wobbles at 1 Hz: 4 flips in 2 s, enough for the old threshold
+    frames = lambda t: hand(x=0.08 * math.sin(t * 2), upright=0.16, gesture=None,
+                            curl=1.85 + 0.3 * math.sin(2 * math.pi * 1.0 * t), icurl=2.0)
+    assert play(runner, clock, 4.0, frames) == []
+
+
 def test_beckoning_while_the_whole_hand_swings_is_nothing(runner, clock):
     assert play(runner, clock, 2.0, lambda t: four_finger_beckon(t, drift=0.5)) == []
 

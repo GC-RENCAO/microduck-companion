@@ -64,8 +64,10 @@ GESTURES = {
 BECKON_WINDOW_S = 2.0
 BECKON_MIN_SWING = 0.35  # minimum swing of the extension
 BECKON_HYSTERESIS = 0.1
-BECKON_MIN_FLIPS = 4  # open → curled → open → curled: at least two round trips
-BECKON_MAX_DRIFT = 0.25  # how far the whole hand may drift meanwhile
+# Calibrated on a real webcam: three beckons flipped 10–12 times in 2 s with the hand drifting 0.05–0.16;
+# 20 s of petting flipped at most 2 times (fingers straight, hand flat) and drifted up to 0.28.
+BECKON_MIN_FLIPS = 6  # open → curled → open …: at least three round trips
+BECKON_MAX_DRIFT = 0.2  # how far the whole hand may drift meanwhile
 BECKON_COOLDOWN_S = 4.0
 CALIBRATION_SAMPLES = 400  # frames kept per gesture (about 20 s at 20 Hz)
 
@@ -112,10 +114,11 @@ class Tracker:
         self._lock = threading.Lock()
         self._gesture, self._gesture_since, self._fired = None, 0.0, False
         self._gesture_path: list[tuple[float, float]] = []  # where the hand was while the gesture was held
-        self._hand_history: deque[tuple[float, float, float, float, float]] = deque()  # (t, curl, icurl, x, y)
+        self._hand_history: deque[tuple[float, float, float, float, float, float]] = deque()  # (t, curl, icurl, x, y, upright)
         # For calibration: real finger features under each MediaPipe gesture (last CALIBRATION_SAMPLES frames)
         self._samples: dict[str, deque[tuple[float, float, float, float]]] = {}
-        self._beckon_seen: deque[tuple[float, float, int]] = deque(maxlen=CALIBRATION_SAMPLES)  # (swing, drift, flips)
+        self._beckon_seen: deque[tuple[float, float, int, float]] = deque(maxlen=CALIBRATION_SAMPLES)  # (swing, drift, flips, travel)
+        self._beckon_fired: deque[dict] = deque(maxlen=20)  # what each beckon looked like when it fired
         self._cooldown_until: dict[str, float] = {}
         self.last_event: tuple[float, str] | None = None
         self.event_id = 0
@@ -206,7 +209,7 @@ class Tracker:
         if hand is None or not hand.curl:
             history.clear()
             return
-        history.append((now, hand.curl, hand.icurl, hand.x, hand.y))
+        history.append((now, hand.curl, hand.icurl, hand.x, hand.y, hand.upright))
         while history and now - history[0][0] > BECKON_WINDOW_S:
             history.popleft()
         if len(history) < 10 or now < self._cooldown_until.get("beckon", 0):
@@ -214,11 +217,17 @@ class Tracker:
         xs, ys = [h[3] for h in history], [h[4] for h in history]
         drift = max(max(xs) - min(xs), max(ys) - min(ys))
         curls = [h[1] for h in history]
-        self._beckon_seen.append((max(curls) - min(curls), drift, _flips(curls)))
-        if drift > BECKON_MAX_DRIFT:
+        flips = max(_flips(curls), _flips([h[2] for h in history]))
+        travel = sum(((b[3] - a[3]) ** 2 + (b[4] - a[4]) ** 2) ** 0.5 for a, b in zip(history, list(history)[1:]))
+        self._beckon_seen.append((max(curls) - min(curls), drift, flips, travel))
+        if drift > BECKON_MAX_DRIFT or flips < BECKON_MIN_FLIPS:
             return
-        if max(_flips([h[1] for h in history]), _flips([h[2] for h in history])) < BECKON_MIN_FLIPS:
-            return
+        uprights = [h[5] for h in history]
+        self._beckon_fired.append({"at": time.strftime("%H:%M:%S"), "curl_swing": round(max(curls) - min(curls), 3),
+                                   "icurl_swing": round(max(h[2] for h in history) - min(h[2] for h in history), 3),
+                                   "curl_flips": _flips(curls), "icurl_flips": _flips([h[2] for h in history]),
+                                   "drift": round(drift, 3), "travel": round(travel, 3),
+                                   "upright": round(sorted(uprights)[len(uprights) // 2], 3), "frames": len(history)})
         self._cooldown_until["beckon"] = now + BECKON_COOLDOWN_S
         history.clear()
         label, steps = BECKON
@@ -230,7 +239,7 @@ class Tracker:
         """Finger feature statistics from the real camera (the thresholds are at the top of this file).
 
         Grouped by MediaPipe's gesture label, 5% / 50% / 95% quantiles per feature. `beckon` holds the
-        quantiles of the extension swing, hand drift and flips over 2 s windows — beckon at the camera
+        quantiles of the extension swing, hand drift (bounding box), travel (path length) and flips over 2 s windows — beckon at the camera
         and compare them with the BECKON_* thresholds. Labels are MediaPipe's even below MIN_SCORE;
         `confident` is the share of frames scoring enough to count as that gesture.
         """
@@ -247,8 +256,9 @@ class Tracker:
                               "confident": round(sum(score >= GESTURES[label].min_score if label in GESTURES else MIN_SCORE
                                                      for score in columns[4]) / len(rows), 3)}
         if self._beckon_seen:
-            swing, drift, flips = zip(*self._beckon_seen)
-            out["beckon"] = {"windows": len(swing), "curl_swing": spread(swing), "drift": spread(drift), "flips": spread(flips),
+            swing, drift, flips, travel = zip(*self._beckon_seen)
+            out["beckon"] = {"fired": list(self._beckon_fired),"windows": len(swing), "curl_swing": spread(swing), "drift": spread(drift), "flips": spread(flips),
+                             "travel": spread(travel),
                              "thresholds": {"min_swing": BECKON_MIN_SWING, "max_drift": BECKON_MAX_DRIFT, "min_flips": BECKON_MIN_FLIPS}}
         out["min_score"] = MIN_SCORE
         stop = GESTURES["Open_Palm"]
@@ -260,3 +270,4 @@ class Tracker:
     def reset_calibration(self) -> None:
         self._samples.clear()
         self._beckon_seen.clear()
+        self._beckon_fired.clear()
