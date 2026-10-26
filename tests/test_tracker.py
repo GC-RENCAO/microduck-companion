@@ -123,4 +123,13 @@ def test_calibration_reports_real_feature_ranges(runner, clock):
     assert stats["Open_Palm"]["curl"]["p50"] > stats["Closed_Fist"]["curl"]["p50"]
     assert stats["beckon"]["curl_swing"]["p95"] > stats["beckon"]["thresholds"]["min_swing"]
     tracker.reset_calibration()
-    assert set(tracker.calibration()) == {"stop_thresholds"}
+    assert set(tracker.calibration()) == {"min_score", "stop_thresholds"}
+
+
+def test_calibration_keeps_low_confidence_labels(runner, clock):
+    tracker = Tracker(runner)
+    for _ in range(20):
+        tracker.observe(hand(score=0.6))
+        clock.advance(1 / HZ)
+    palm = tracker.calibration()["Open_Palm"]  # not lumped into "None": the low score is the finding
+    assert palm["score"]["p50"] == 0.6 and palm["confident"] == 0

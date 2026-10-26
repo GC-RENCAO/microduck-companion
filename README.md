@@ -111,7 +111,8 @@ curl -s localhost:8765/api/calibration | python3 -m json.tool   # p5/p50/p95 of 
 curl -s -X POST localhost:8765/api/calibration                    # start a fresh recording
 ```
 
-A stop palm should sit above `min_upright`/`min_size`; a beckon's `curl_swing` and `flips` above the `BECKON_*`
+Record one gesture at a time (POST to reset in between). Frames are grouped by MediaPipe's own label even below
+its confidence cut (`min_score`); `confident` is the share that actually counts as that gesture. A stop palm should sit above `min_upright`/`min_size`; a beckon's `curl_swing` and `flips` above the `BECKON_*`
 thresholds while its `drift` stays below. Please share the numbers in an issue if your camera needs different values.
 
 ## The upstream patch

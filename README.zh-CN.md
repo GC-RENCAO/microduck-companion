@@ -169,7 +169,8 @@ cd ../duck-chat && DUCK_SIM_SCENE=apartment ./run.sh
 **按你的摄像头校准**：阈值是在一个摄像头上调的。打开摄像头后，每种动作各做约 20 秒——竖着手掌靠近镜头（停）、
 平着手慢慢“摸”、勾勾手——然后 `curl -s localhost:8765/api/calibration | python3 -m json.tool` 看每种手势下各特征的
 5% / 50% / 95% 分位（`beckon` 是勾手时的摆幅、漂移和来回次数），和 `tracker.py` 顶部的阈值对照；
-`curl -X POST localhost:8765/api/calibration` 清空重新统计。
+`curl -X POST localhost:8765/api/calibration` 清空重新统计。建议一次只做一种手势、做完前清空一次。分组用的是 MediaPipe 自己的标签（置信度不够也照样记），
+`confident` 是其中真正够得上 `min_score` 的比例。
 
 摄像头开着时聊天，会附带一张当前画面（384 宽、镜像）给本地大模型的“嘴巴”，所以可以问“我手里拿的是什么”。
 带图时回复会慢 2–4 秒（模型要先看图）。

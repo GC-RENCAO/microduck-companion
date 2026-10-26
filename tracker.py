@@ -139,9 +139,10 @@ class Tracker:
                 seen.kind, seen.gesture, seen.speed = "none", None, 0.0
         hand = seen if seen.kind == "hand" else None
         if hand is not None and hand.curl:
-            label = (data.get("gesture") or "None") if float(data.get("score", 1) or 0) >= MIN_SCORE else "None"
+            # MediaPipe's own label whatever its score: frames below MIN_SCORE are exactly what calibration must show
+            label = str(data.get("gesture") or "None")
             self._samples.setdefault(label, deque(maxlen=CALIBRATION_SAMPLES)).append(
-                (hand.curl, hand.icurl, hand.upright, hand.size))
+                (hand.curl, hand.icurl, hand.upright, hand.size, float(data.get("score", 0) or 0)))
         self._gestures(hand, now)
         self._beckon(hand, now)
         event = self.last_event
@@ -221,7 +222,8 @@ class Tracker:
 
         Grouped by MediaPipe's gesture label, 5% / 50% / 95% quantiles per feature. `beckon` holds the
         quantiles of the extension swing, hand drift and flips over 2 s windows — beckon at the camera
-        and compare them with the BECKON_* thresholds.
+        and compare them with the BECKON_* thresholds. Labels are MediaPipe's even below MIN_SCORE;
+        `confident` is the share of frames that would count as that gesture.
         """
         def spread(values):
             values = sorted(values)
@@ -232,11 +234,13 @@ class Tracker:
             if rows:
                 columns = list(zip(*rows))
                 out[label] = {"frames": len(rows), **{name: spread(col) for name, col in
-                                                      zip(("curl", "icurl", "upright", "size"), columns)}}
+                                                      zip(("curl", "icurl", "upright", "size", "score"), columns)},
+                              "confident": round(sum(score >= MIN_SCORE for score in columns[4]) / len(rows), 3)}
         if self._beckon_seen:
             swing, drift, flips = zip(*self._beckon_seen)
             out["beckon"] = {"windows": len(swing), "curl_swing": spread(swing), "drift": spread(drift), "flips": spread(flips),
                              "thresholds": {"min_swing": BECKON_MIN_SWING, "max_drift": BECKON_MAX_DRIFT, "min_flips": BECKON_MIN_FLIPS}}
+        out["min_score"] = MIN_SCORE
         out["stop_thresholds"] = {"min_size": GESTURES["Open_Palm"].min_size, "min_upright": GESTURES["Open_Palm"].min_upright,
                                   "max_drift": GESTURES["Open_Palm"].max_drift, "hold_s": GESTURES["Open_Palm"].hold_s}
         return out
