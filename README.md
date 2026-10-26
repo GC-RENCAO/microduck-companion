@@ -103,7 +103,7 @@ CI runs the same suite on every push (`.github/workflows/tests.yml`).
 ### Calibrating gestures to your camera
 
 The gesture thresholds (top of `tracker.py`) were tuned on one webcam. To check them on yours, turn the camera on,
-then for ~20 s each: hold a raised palm close to the camera (stop), pet the air slowly with a flat hand, and beckon
+then for ~20 s each: hold a raised palm towards the camera (stop), pet the air slowly with a flat hand, and beckon
 with your fingers. Then:
 
 ```bash

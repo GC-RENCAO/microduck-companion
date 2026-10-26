@@ -23,7 +23,7 @@ PRESENT_S = 0.6  # no hand/face for this long = nobody there
 CAMERA_ON_S = 1.5  # no frame from the browser for this long = the camera is off
 
 GESTURE_COOLDOWN_S = 2.0
-MIN_SCORE = 0.75  # MediaPipe gesture confidence
+MIN_SCORE = 0.75  # MediaPipe gesture confidence (default; a gesture may set its own)
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,8 @@ class Gesture:
     min_size: float = 0.0  # minimum hand size (fraction of frame width): bigger = closer to the camera
     max_drift: float = 99.0  # how far the hand may drift while held (frame half-width = 1): stop is held still
     min_upright: float = -99.0  # how upright the fingers are (middle tip above wrist, in palm lengths): stop is a raised palm
+    min_curl: float = 0.0  # how open the four fingers are (about 2 open, about 1 in a fist)
+    min_score: float = MIN_SCORE  # MediaPipe confidence
 
 
 # “Stop” is the strictest: MediaPipe calls almost any open hand Open_Palm (in real use a hand merely
@@ -43,8 +45,13 @@ class Gesture:
 # each end, so its average speed is low.
 # And the fingers must point up (a raised palm): very slow petting barely moves in a second and position
 # alone cannot tell it apart, but a petting hand is usually flat or tilted.
+# Calibrated on a real webcam: a held raised palm is always labelled Open_Palm but scores only 0.51–0.62,
+# at a size of 0.18–0.27 from a normal sitting distance — so stop leans on its own finger features (open,
+# upright, still for 1 s) rather than on MediaPipe's confidence. Petting at the same distance was mostly
+# labelled None, never held still.
 GESTURES = {
-    "Open_Palm": Gesture("✋ 停", (Step("stop", {}),), hold_s=1.0, min_size=0.28, max_drift=0.1, min_upright=1.0),
+    "Open_Palm": Gesture("✋ 停", (Step("stop", {}),), hold_s=1.0, min_size=0.16, max_drift=0.1, min_upright=1.0,
+                         min_curl=1.5, min_score=0.5),
     "Thumb_Up": Gesture("👍 开心", (Step("make_sound", {"kind": "coo"}),), hold_s=0.7),
     "Victory": Gesture("✌️ 翻滚", (Step("do_trick", {"name": "roulade"}),), hold_s=0.7),
     "ILoveYou": Gesture("🤟 打招呼", (Step("make_sound", {"kind": "greet"}),), hold_s=0.7),
@@ -88,7 +95,8 @@ class Seen:
     y: float = 0.0
     size: float = 0.0
     speed: float = 0.0  # position change, frame half-widths per second (smoothed)
-    gesture: str | None = None
+    gesture: str | None = None  # MediaPipe's label, whatever its score
+    score: float = 0.0
     curl: float = 0.0  # mean extension of the four fingers (about 2 open, about 1 in a fist)
     icurl: float = 0.0  # index finger extension
     upright: float = 0.0  # middle fingertip above the wrist, in palm lengths (> 1 = fingers up)
@@ -130,8 +138,8 @@ class Tracker:
                     seen.speed = 0.0
                 seen.kind, seen.x, seen.y, seen.at = kind, x, y, now
                 seen.size = max(0.0, min(1.0, float(data.get("size", 0) or 0)))
-                score = float(data.get("score", 1) or 0)
-                seen.gesture = (data.get("gesture") or None) if score >= MIN_SCORE else None
+                seen.gesture = data.get("gesture") or None
+                seen.score = float(data.get("score", 1) or 0)
                 seen.curl = float(data.get("curl", 0) or 0)
                 seen.icurl = float(data.get("icurl", 0) or 0)
                 seen.upright = float(data.get("upright", 0) or 0)
@@ -172,8 +180,9 @@ class Tracker:
         before it can fire again, and each has a cooldown."""
         name = seen.gesture if seen is not None and seen.gesture in GESTURES else None
         gesture = GESTURES.get(name)
-        if gesture is not None and (seen.size < gesture.min_size or seen.upright < gesture.min_upright):
-            name, gesture = None, None  # the right shape but not deliberate (too far / fingers not up): ignore
+        if gesture is not None and (seen.score < gesture.min_score or seen.size < gesture.min_size
+                                    or seen.upright < gesture.min_upright or seen.curl < gesture.min_curl):
+            name, gesture = None, None  # unsure, or the right shape but not deliberate (too far / fingers not up): ignore
         if name != self._gesture:
             self._gesture, self._gesture_since, self._fired, self._gesture_path = name, now, False, []
         if gesture is not None:
@@ -223,7 +232,7 @@ class Tracker:
         Grouped by MediaPipe's gesture label, 5% / 50% / 95% quantiles per feature. `beckon` holds the
         quantiles of the extension swing, hand drift and flips over 2 s windows — beckon at the camera
         and compare them with the BECKON_* thresholds. Labels are MediaPipe's even below MIN_SCORE;
-        `confident` is the share of frames that would count as that gesture.
+        `confident` is the share of frames scoring enough to count as that gesture.
         """
         def spread(values):
             values = sorted(values)
@@ -235,14 +244,17 @@ class Tracker:
                 columns = list(zip(*rows))
                 out[label] = {"frames": len(rows), **{name: spread(col) for name, col in
                                                       zip(("curl", "icurl", "upright", "size", "score"), columns)},
-                              "confident": round(sum(score >= MIN_SCORE for score in columns[4]) / len(rows), 3)}
+                              "confident": round(sum(score >= GESTURES[label].min_score if label in GESTURES else MIN_SCORE
+                                                     for score in columns[4]) / len(rows), 3)}
         if self._beckon_seen:
             swing, drift, flips = zip(*self._beckon_seen)
             out["beckon"] = {"windows": len(swing), "curl_swing": spread(swing), "drift": spread(drift), "flips": spread(flips),
                              "thresholds": {"min_swing": BECKON_MIN_SWING, "max_drift": BECKON_MAX_DRIFT, "min_flips": BECKON_MIN_FLIPS}}
         out["min_score"] = MIN_SCORE
-        out["stop_thresholds"] = {"min_size": GESTURES["Open_Palm"].min_size, "min_upright": GESTURES["Open_Palm"].min_upright,
-                                  "max_drift": GESTURES["Open_Palm"].max_drift, "hold_s": GESTURES["Open_Palm"].hold_s}
+        stop = GESTURES["Open_Palm"]
+        out["stop_thresholds"] = {"min_score": stop.min_score, "min_size": stop.min_size, "min_upright": stop.min_upright,
+                                  "min_curl": stop.min_curl,
+                                  "max_drift": stop.max_drift, "hold_s": stop.hold_s}
         return out
 
     def reset_calibration(self) -> None:

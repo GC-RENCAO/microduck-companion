@@ -45,11 +45,23 @@ def test_stop_needs_one_second(runner, clock):
 
 
 def test_far_palm_is_not_stop(runner, clock):
-    assert play(runner, clock, 1.5, lambda t: hand(size=0.15)) == []
+    assert play(runner, clock, 1.5, lambda t: hand(size=0.12)) == []
 
 
 def test_low_confidence_is_ignored(runner, clock):
-    assert play(runner, clock, 1.5, lambda t: hand(score=0.6)) == []
+    assert play(runner, clock, 1.5, lambda t: hand(score=0.4)) == []
+    runner.submitted.clear()
+    assert play(runner, clock, 1.5, lambda t: hand(gesture="Thumb_Up", score=0.6, curl=1.1, upright=0.2)) == []
+
+
+def test_a_real_webcams_stop_palm_triggers(runner, clock):
+    # measured: Open_Palm at 0.58–0.60, size 0.18–0.27, extension 1.7, upright 1.8, drift 0.03
+    frames = lambda t: hand(score=0.59 + j(0.01), size=0.21 + j(0.03), curl=1.71 + j(0.01), upright=1.82 + j(0.02), x=j(0.015), y=j(0.015))
+    assert play(runner, clock, 2.0, frames) == ["stop"]
+
+
+def test_a_half_closed_upright_hand_is_not_stop(runner, clock):
+    assert play(runner, clock, 1.5, lambda t: hand(score=0.59, curl=1.2, upright=1.1)) == []
 
 
 def test_slow_flat_petting_is_not_stop(runner, clock):
@@ -132,4 +144,4 @@ def test_calibration_keeps_low_confidence_labels(runner, clock):
         tracker.observe(hand(score=0.6))
         clock.advance(1 / HZ)
     palm = tracker.calibration()["Open_Palm"]  # not lumped into "None": the low score is the finding
-    assert palm["score"]["p50"] == 0.6 and palm["confident"] == 0
+    assert palm["score"]["p50"] == 0.6 and palm["confident"] == 1  # stop accepts 0.5
