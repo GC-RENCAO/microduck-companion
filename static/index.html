@@ -1,0 +1,678 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>鸭子屏幕</title>
+<style>
+  :root {
+    --bg: #0e1520; --panel: #151f2e; --line: #243247; --text: #e7edf5; --muted: #8a9bb3;
+    --accent: #ff8a1f; --duck: #1f2d42; --me: #ff8a1f; --me-text: #1b1206; --bad: #ff6b6b; --ok: #4fd08a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; }
+  .app { display: grid; grid-template-columns: minmax(0, 1fr) 380px; height: 100vh; }
+  .stage { position: relative; overflow: hidden; background: #0a1019; }
+  .stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  .hud { position: absolute; left: 16px; top: 14px; display: flex; gap: 8px; align-items: center; }
+  .pill { background: rgba(10,16,25,.75); border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; font-size: 13px; color: var(--muted); }
+  .pill b { color: var(--text); font-weight: 600; }
+  button.pill { cursor: pointer; color: var(--text); font: inherit; font-size: 13px; }
+  button.pill:hover { border-color: var(--accent); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); margin-right: 6px; vertical-align: 1px; }
+  .dot.on { background: var(--ok); }
+  .hint { position: absolute; right: 16px; bottom: 12px; font-size: 12px; color: var(--muted); background: rgba(10,16,25,.6); padding: 3px 10px; border-radius: 6px; pointer-events: none; }
+  .bubble-over { position: absolute; left: 50%; top: 14%; transform: translateX(-50%); background: #fff; color: #222; padding: 8px 16px; border-radius: 16px; font-size: 18px; box-shadow: 0 6px 20px rgba(0,0,0,.35); opacity: 0; transition: opacity .25s; pointer-events: none; max-width: 70%; text-align: center; }
+  .bubble-over.show { opacity: 1; }
+  .cam { position: absolute; left: 16px; bottom: 12px; width: 240px; aspect-ratio: 4 / 3; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: #000; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
+  .cam video, .cam canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  .cam-label { position: absolute; left: 8px; bottom: 6px; font-size: 12px; color: #fff; background: rgba(0,0,0,.55); padding: 1px 8px; border-radius: 6px; }
+  .toast { position: absolute; left: 50%; bottom: 22%; transform: translateX(-50%); background: rgba(255,138,31,.95); color: #1b1206; font-weight: 600; padding: 6px 16px; border-radius: 999px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .pill.on { border-color: var(--accent); color: var(--accent); }
+  .overlay { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; color: var(--muted); padding: 24px; background: rgba(10,16,25,.55); pointer-events: none; }
+  .overlay.show { display: flex; }
+  .overlay code { color: var(--accent); }
+
+  .chat { display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); min-height: 0; }
+  .chat header { padding: 14px 16px; border-bottom: 1px solid var(--line); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+  .chat header span { font-weight: 400; color: var(--muted); font-size: 13px; }
+  .log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 85%; padding: 8px 12px; border-radius: 14px; white-space: pre-wrap; word-break: break-word; }
+  .msg.duck { background: var(--duck); align-self: flex-start; border-bottom-left-radius: 4px; }
+  .msg.duck.bad { border: 1px solid rgba(255,107,107,.5); }
+  .msg.thinking { color: var(--muted); font-style: italic; }
+  .meta { align-self: flex-start; margin-top: -6px; font-size: 11px; color: var(--muted); }
+  .msg.me { background: var(--me); color: var(--me-text); align-self: flex-end; border-bottom-right-radius: 4px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 16px 0; }
+  .chip { background: transparent; color: var(--text); border: 1px solid var(--line); border-radius: 999px; padding: 4px 11px; font-size: 13px; cursor: pointer; }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
+  form { display: flex; gap: 8px; padding: 12px 16px 16px; }
+  input { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--line); color: var(--text); border-radius: 10px; padding: 10px 12px; font-size: 15px; outline: none; }
+  input:focus { border-color: var(--accent); }
+  button.send { background: var(--accent); color: var(--me-text); border: 0; border-radius: 10px; padding: 0 16px; font-weight: 600; cursor: pointer; }
+
+  @media (max-width: 820px) {
+    .app { grid-template-columns: 1fr; grid-template-rows: 50vh minmax(0, 1fr); }
+    .chat { border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div class="app">
+  <main class="stage" id="stage">
+    <div class="hud">
+      <span class="pill"><span class="dot" id="dot"></span><b id="state">连接中…</b></span>
+      <button class="pill" id="reset" type="button">视角复位</button>
+      <button class="pill" id="camBtn" type="button">📷 摄像头</button>
+      <span class="pill" id="brain"></span>
+      <span class="pill" id="fps"></span>
+    </div>
+    <div class="bubble-over" id="say"></div>
+    <div class="overlay show" id="overlay"><div id="overlayText">正在加载鸭子模型…</div></div>
+    <div class="cam" id="cam" hidden>
+      <video id="camVideo" playsinline muted></video>
+      <canvas id="camOverlay"></canvas>
+      <div class="cam-label" id="camLabel">启动中…</div>
+    </div>
+    <div class="toast" id="toast"></div>
+    <div class="hint">拖动旋转 · 右键平移 · 滚轮缩放</div>
+  </main>
+
+  <aside class="chat">
+    <header>和鸭子聊天 <span>回车发送</span></header>
+    <div class="log" id="log"></div>
+    <div class="chips" id="chips"></div>
+    <form id="form" autocomplete="off">
+      <input id="text" placeholder="比如：往前走 5 秒 / 坐下 / 你好" autofocus>
+      <button class="send" type="submit">发送</button>
+    </form>
+  </aside>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+// ── 聊天 ────────────────────────────────────────────────────────────────
+const log = document.getElementById("log");
+const input = document.getElementById("text");
+const sayBubble = document.getElementById("say");
+let sayTimer;
+
+function add(text, who, bad) {
+  const el = document.createElement("div");
+  el.className = "msg " + who + (bad ? " bad" : "");
+  el.textContent = text;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+function speak(text) {
+  sayBubble.textContent = text.split("\n")[0];
+  sayBubble.classList.add("show");
+  clearTimeout(sayTimer);
+  sayTimer = setTimeout(() => sayBubble.classList.remove("show"), 2600);
+}
+const TOOL_NAMES = { walk_forward: "走", turn: "转", stop: "停", sit_down: "坐", stand_up: "站", do_trick: "技能", look: "看", make_sound: "叫" };
+async function send(text) {
+  text = text.trim();
+  if (!text) return;
+  add(text, "me");
+  const thinking = document.createElement("div");
+  thinking.className = "msg duck thinking";
+  thinking.textContent = "小鸭子在想…";
+  log.appendChild(thinking);
+  log.scrollTop = log.scrollHeight;
+  const started = performance.now();
+  const secs = () => ((performance.now() - started) / 1000).toFixed(1) + " 秒";
+  let bubble = null, reply = "", actMeta = "", meta = null;
+  const handle = (ev) => {
+    if (ev.type === "act") {
+      const steps = (ev.steps || []).map((s) => (TOOL_NAMES[s.name] || s.name) + (s.args && Object.keys(s.args).length ? " " + Object.values(s.args).join(" ") : ""));
+      actMeta = steps.length ? "动作 " + secs() + "：" + steps.join(" → ") : "";
+      thinking.textContent = steps.length ? "小鸭子动起来了，正在说…" : "小鸭子在想怎么说…";
+    } else if (ev.type === "delta") {
+      if (!bubble) { thinking.remove(); bubble = add("", "duck"); }
+      reply += ev.text;
+      bubble.textContent = reply;
+      log.scrollTop = log.scrollHeight;
+    } else if (ev.type === "done") {
+      if (!bubble) { thinking.remove(); bubble = add(reply || "嘎？", "duck"); }
+      if (!ev.ok) bubble.classList.add("bad");
+      meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = [secs(), ev.brain === "rules" ? "规则模式" : ev.brain, actMeta].filter(Boolean).join(" · ");
+      log.appendChild(meta);
+      log.scrollTop = log.scrollHeight;
+      if (ev.action !== "help") speak(reply);
+    }
+  };
+  try {
+    const image = window.duckSnapshot ? window.duckSnapshot() : null;
+    const res = await fetch("/api/say", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(image ? { text, image } : { text }) });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (line) handle(JSON.parse(line));
+      }
+    }
+    if (!meta) handle({ type: "done", ok: false, brain: "" });
+  } catch (e) {
+    thinking.remove();
+    add("鸭子屏幕的服务好像停了：" + e.message, "duck", true);
+  }
+  refresh();
+}
+document.getElementById("form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = input.value;
+  input.value = "";
+  send(text);
+});
+// 中文输入法选字时的回车不发送
+input.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.isComposing || e.keyCode === 229)) e.preventDefault(); });
+
+const chips = document.getElementById("chips");
+for (const q of ["过来", "看着我", "去厨房", "去沙发", "回窝", "停", "前进", "坐下", "站起来", "翻滚", "你好", "帮助"]) {
+  const b = document.createElement("button");
+  b.className = "chip"; b.type = "button"; b.textContent = q;
+  b.onclick = () => { send(q); input.focus(); };
+  chips.appendChild(b);
+}
+
+// ── 状态 ────────────────────────────────────────────────────────────────
+const overlay = document.getElementById("overlay");
+const overlayText = document.getElementById("overlayText");
+let modelReady = false, bodyOnline = false;
+let navPath = null;  // 鸭子正在走的路线（服务器规划的），画在地板上
+const names = { stand: "站着", walk: "走路中", sit: "坐着", sitstand: "起身/坐下中", held: "被扶着" };
+function showOverlay() {
+  if (!modelReady) return;
+  overlay.classList.toggle("show", !bodyOnline);
+  if (!bodyOnline) overlayText.innerHTML = '看不到鸭子 🦆<br>先在 microduck 目录运行 <code>DUCK_SIM_VIEWER=0 scripts/duck-sim</code>';
+}
+async function refresh() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    bodyOnline = s.body;
+    document.getElementById("dot").classList.toggle("on", s.robot && s.body);
+    const life = s.life || {};
+    navPath = life.path || null;
+    const mood = life.napping ? "😴" : life.happy > 0.75 ? "😄" : life.happy > 0.55 ? "🙂" : life.happy > 0.35 ? "😐" : "😟";
+    document.getElementById("state").textContent = !s.robot ? "鸭子离线" : s.fallen ? "摔倒了 😵" : mood + " " + (names[s.policy] || s.policy || "在线");
+    document.getElementById("brain").textContent = s.brain === "rules" ? "规则模式" : (s.brain_ready ? "🧠 " + s.brain : "🧠 " + s.brain + "（未就绪）");
+  } catch (e) {
+    bodyOnline = false;
+    document.getElementById("state").textContent = "服务未运行";
+  }
+  showOverlay();
+}
+setInterval(refresh, 1000);
+refresh();
+
+// ── 3D：场景 ─────────────────────────────────────────────────────────────
+// MuJoCo 是 z 朝上；这里整个场景也用 z 朝上，零件矩阵可以原样套用。
+THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
+const stage = document.getElementById("stage");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+stage.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b2a3f);
+scene.fog = new THREE.Fog(0x1b2a3f, 4, 14);
+
+const camera = new THREE.PerspectiveCamera(40, 1, 0.02, 60);
+const HOME_OFFSET = new THREE.Vector3(-0.55, -0.55, 0.32);
+camera.position.copy(HOME_OFFSET);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 0.25;
+controls.maxDistance = 6;
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.target.set(0, 0, 0.1);
+
+scene.add(new THREE.HemisphereLight(0xdfe9ff, 0x2a3546, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -0.6, right: 0.6, top: 0.6, bottom: -0.6, near: 0.1, far: 6 });
+sun.shadow.bias = -0.0004;
+scene.add(sun, sun.target);
+const SUN_OFFSET = new THREE.Vector3(1.2, -0.8, 2.4);
+
+// 棋盘地面（1 m 大格 + 细线），和 MuJoCo 默认地面同色系
+function checker() {
+  const c = document.createElement("canvas"); c.width = c.height = 256;
+  const g = c.getContext("2d");
+  g.fillStyle = "#2c4566"; g.fillRect(0, 0, 256, 256);
+  g.fillStyle = "#243a57"; g.fillRect(0, 0, 128, 128); g.fillRect(128, 128, 128, 128);
+  g.strokeStyle = "rgba(220,235,255,.35)"; g.lineWidth = 2; g.strokeRect(0, 0, 256, 256);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(40, 40);
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy(); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.MeshStandardMaterial({ map: checker(), roughness: 0.85, metalness: 0 }));
+floor.receiveShadow = true;
+scene.add(floor);
+
+function resize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(stage);
+resize();
+
+// ── 3D：鸭子零件 ──────────────────────────────────────────────────────────
+let parts = [];
+let duckParts = 0;  // parts 里前这么多个是鸭子，后面是球、箱子
+const walls = [];  // 挡住鸭子时变透明
+async function loadDuck() {
+  const [layout, blob] = await Promise.all([
+    fetch("/api/scene").then((r) => r.json()),
+    fetch("/api/meshes.bin").then((r) => r.arrayBuffer()),
+  ]);
+  const geometries = {};
+  for (const [id, m] of Object.entries(layout.meshes)) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(blob, m.offset, m.verts * 3), 3));
+    geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(blob, m.offset + m.verts * 12, m.faces * 3), 1));
+    geometry.computeBoundingSphere();
+    geometries[id] = geometry;
+  }
+  // 和 MuJoCo 同一套几何：尺寸都是“半长”，圆柱/胶囊沿 z 轴（three.js 默认沿 y，要转过来）
+  const shape = (item) => {
+    const [a, b, c] = item.size;
+    switch (item.type) {
+      case "mesh": return geometries[item.mesh];
+      case "box": return new THREE.BoxGeometry(2 * a, 2 * b, 2 * c);
+      case "plane": return new THREE.PlaneGeometry(a ? 2 * a : 40, b ? 2 * b : 40);
+      case "sphere": return new THREE.SphereGeometry(a, 32, 16);
+      case "ellipsoid": return new THREE.SphereGeometry(1, 32, 16).scale(a, b, c);
+      case "cylinder": return new THREE.CylinderGeometry(a, a, 2 * b, 32).rotateX(Math.PI / 2);
+      case "capsule": return new THREE.CapsuleGeometry(a, 2 * b, 8, 24).rotateX(Math.PI / 2);
+    }
+  };
+  const textureLoader = new THREE.TextureLoader();
+  const textureCache = {};
+  const materialFor = (item) => {
+    const [r, g, b, alpha] = item.rgba;
+    const options = { color: new THREE.Color().setRGB(r, g, b, THREE.SRGBColorSpace), roughness: 0.6, metalness: 0.05,
+      flatShading: item.type === "mesh", transparent: alpha < 1 || !!item.wall, opacity: alpha };
+    if (item.tex !== undefined) {
+      const base = textureCache[item.tex] || (textureCache[item.tex] = textureLoader.load(`/api/tex/${item.tex}.png`));
+      const map = base.clone();
+      map.wrapS = map.wrapT = THREE.RepeatWrapping;
+      map.colorSpace = THREE.SRGBColorSpace;
+      map.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      // texuniform：每米重复 texrepeat 次（取面积最大那个面的两条边）；否则整个面重复 texrepeat 次
+      const dims = item.size.map((v) => 2 * v).sort((p, q) => q - p);
+      const [rx, ry] = item.texrepeat || [1, 1];
+      map.repeat.set(item.texuniform ? rx * dims[0] : rx, item.texuniform ? ry * dims[1] : ry);
+      options.map = map;
+      options.color = new THREE.Color(1, 1, 1);
+    }
+    return new THREE.MeshStandardMaterial(options);
+  };
+  const shared = new Map();
+  const sharedMaterial = (item) => {  // 鸭子的零件颜色重复很多，共用材质
+    if (item.tex !== undefined) return materialFor(item);
+    const key = item.rgba.join(",") + item.type;
+    if (!shared.has(key)) shared.set(key, materialFor(item));
+    return shared.get(key);
+  };
+
+  // 房子：墙、地板、家具，位置只发一次
+  for (const item of layout.statics || []) {
+    const mesh = new THREE.Mesh(shape(item), item.wall ? materialFor(item) : sharedMaterial(item));
+    const p = item.pose;
+    mesh.matrixAutoUpdate = false;
+    mesh.matrix.set(p[3], p[4], p[5], p[0], p[6], p[7], p[8], p[1], p[9], p[10], p[11], p[2], 0, 0, 0, 1);
+    mesh.receiveShadow = true;
+    mesh.castShadow = !item.wall;  // 墙不投影子，不然房间里一片黑
+    if (item.wall) walls.push(mesh);
+    scene.add(mesh);
+  }
+  if (layout.floor) floor.position.z = -0.02;  // 场景自带地板：我们的棋盘地面退到下面当“屋外”
+  duckParts = layout.duck_parts ?? layout.parts.length;
+
+  // 鸭子和房间里会动的东西：每帧更新
+  parts = layout.parts.map((p) => {
+    const mesh = new THREE.Mesh(shape(p), sharedMaterial(p));
+    mesh.matrixAutoUpdate = false;
+    mesh.castShadow = true;
+    mesh.visible = false;
+    scene.add(mesh);
+    return mesh;
+  });
+  modelReady = true;
+  overlay.classList.remove("show");
+  showOverlay();
+}
+
+// ── 3D：姿态流与插值 ───────────────────────────────────────────────────────
+// 每帧：float64 仿真时间 + 每零件 [x y z, 3×3 行优先旋转]。收到后转成位置+四元数存进缓冲，
+// 渲染时按“仿真时间 - 一点延迟”在两帧之间插值，所以 60 fps 画面比 50 Hz 数据更顺滑。
+const frames = [];
+const PLAYBACK_DELAY = 0.06;
+let clockOffset = null; // 仿真时间 - 本地时间
+const m4 = new THREE.Matrix4();
+
+function decode(buffer) {
+  const view = new DataView(buffer);
+  const t = view.getFloat64(0, true);
+  const f = new Float32Array(buffer, 8);
+  const n = f.length / 12;
+  const pos = new Float32Array(n * 3), quat = new Float32Array(n * 4);
+  const q = new THREE.Quaternion();
+  for (let i = 0; i < n; i++) {
+    const o = i * 12;
+    pos[i * 3] = f[o]; pos[i * 3 + 1] = f[o + 1]; pos[i * 3 + 2] = f[o + 2];
+    m4.set(f[o + 3], f[o + 4], f[o + 5], 0, f[o + 6], f[o + 7], f[o + 8], 0, f[o + 9], f[o + 10], f[o + 11], 0, 0, 0, 0, 1);
+    q.setFromRotationMatrix(m4).toArray(quat, i * 4);
+  }
+  return { t, pos, quat };
+}
+
+async function streamPoses() {
+  for (;;) {
+    try {
+      const res = await fetch("/api/pose");
+      const reader = res.body.getReader();
+      let pending = new Uint8Array(0);
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const merged = new Uint8Array(pending.length + value.length);
+        merged.set(pending); merged.set(value, pending.length);
+        let at = 0;
+        while (merged.length - at >= 4) {
+          const len = merged[at] | (merged[at + 1] << 8) | (merged[at + 2] << 16) | (merged[at + 3] << 24);
+          if (merged.length - at - 4 < len) break;
+          const frame = decode(merged.slice(at + 4, at + 4 + len).buffer);
+          const now = performance.now() / 1000;
+          if (clockOffset === null || frames.length === 0 || frame.t < frames[frames.length - 1].t) {
+            frames.length = 0; clockOffset = frame.t - now; // 首帧或仿真重启：重新对时
+          }
+          clockOffset += (frame.t - now - clockOffset) * 0.05; // 平滑跟随网络抖动
+          frames.push(frame);
+          if (frames.length > 40) frames.shift();
+          at += 4 + len;
+        }
+        pending = merged.slice(at);
+      }
+    } catch (e) { /* 服务重启：稍后重连 */ }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+const pa = new THREE.Vector3(), pb = new THREE.Vector3(), qa = new THREE.Quaternion(), qb = new THREE.Quaternion();
+const center = new THREE.Vector3(), lastCenter = new THREE.Vector3(), scale1 = new THREE.Vector3(1, 1, 1);
+let haveCenter = false;
+const VIEW_MAX_M = 3.0, VIEW_MIN_M = 0.35;
+const tmpTarget = new THREE.Vector3(), tmpFlat = new THREE.Vector3();
+
+// 把“你”的位置（相机）告诉鸭子：动了就发（最多 4 次/秒），不动也每 2 秒发一次
+const sentViewer = new THREE.Vector3(1e9, 0, 0);
+let viewerSentAt = 0;
+function sendViewer(now) {
+  if (now - viewerSentAt < 250) return;
+  if (camera.position.distanceTo(sentViewer) < 0.01 && now - viewerSentAt < 2000) return;
+  viewerSentAt = now;
+  sentViewer.copy(camera.position);
+  fetch("/api/viewer", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ x: camera.position.x, y: camera.position.y, z: camera.position.z }) }).catch(() => {});
+}
+
+function applyPose() {
+  if (!parts.length || frames.length === 0) return;
+  const playT = performance.now() / 1000 + clockOffset - PLAYBACK_DELAY;
+  let a = frames[0], b = frames[0];
+  for (let i = frames.length - 1; i >= 0; i--) {
+    if (frames[i].t <= playT) { a = frames[i]; b = frames[Math.min(i + 1, frames.length - 1)]; break; }
+  }
+  const span = b.t - a.t;
+  const k = span > 0 ? THREE.MathUtils.clamp((playT - a.t) / span, 0, 1) : 0;
+  center.set(0, 0, 0);
+  for (let i = 0; i < parts.length; i++) {
+    pa.fromArray(a.pos, i * 3); pb.fromArray(b.pos, i * 3);
+    qa.fromArray(a.quat, i * 4); qb.fromArray(b.quat, i * 4);
+    pa.lerp(pb, k); qa.slerp(qb, k);
+    parts[i].matrix.compose(pa, qa, scale1);
+    // 仿真里偶尔有小物体穿过 5 毫米厚的地板掉出世界（物理步长 5 ms），掉到地下就不画了
+    parts[i].visible = pa.z > -1;
+    if (i < duckParts) center.add(pa);
+  }
+  center.divideScalar(duckParts || parts.length);
+  // 相机 = 站在房间里的你：位置不动，只转头盯着鸭子（注视点平滑地跟着它）。
+  // 这样鸭子才能“走到你面前”；它走太远（> VIEW_MAX_M）你才跟上，太近（< VIEW_MIN_M）就退后一点。
+  // 你拖动/缩放视角 = 你在房间里移动，鸭子知道（/api/viewer）。
+  if (haveCenter) {
+    controls.target.lerp(tmpTarget.set(center.x, center.y, 0.1), 0.12);
+    const flat = tmpFlat.set(camera.position.x - center.x, camera.position.y - center.y, 0);
+    const d = flat.length();
+    if (d > VIEW_MAX_M) camera.position.addScaledVector(flat.normalize(), -(d - VIEW_MAX_M) * 0.1);
+    else if (d < VIEW_MIN_M && d > 1e-6) camera.position.addScaledVector(flat.normalize(), (VIEW_MIN_M - d) * 0.2);
+  } else {
+    controls.target.set(center.x, center.y, 0.1);
+    camera.position.copy(controls.target).add(HOME_OFFSET);
+    haveCenter = true;
+  }
+  lastCenter.copy(center);
+  sun.target.position.set(center.x, center.y, 0);
+  sun.position.copy(sun.target.position).add(SUN_OFFSET);
+}
+
+window.duckDebug = { camera, controls, walls, get parts() { return parts; } };  // 调试用：在控制台里摆相机、看墙
+
+// 路线：地板上一条橙色虚线，从鸭子脚下到目的地
+const pathLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color: 0xff8a1f, dashSize: 0.08, gapSize: 0.05 }));
+pathLine.frustumCulled = false;
+scene.add(pathLine);
+let drawnPath = "";
+function drawPath() {
+  const key = JSON.stringify(navPath);
+  if (key === drawnPath) return;
+  drawnPath = key;
+  pathLine.visible = !!navPath;
+  if (!navPath) return;
+  pathLine.geometry.setFromPoints(navPath.map(([x, y]) => new THREE.Vector3(x, y, 0.025)));
+  pathLine.computeLineDistances();
+}
+
+// 挡在你和鸭子之间的墙变半透明（墙高 1.6 米，不然常常只看到墙）
+const rayFrom = new THREE.Vector3(), rayDir = new THREE.Vector3(), raycaster = new THREE.Raycaster();
+function fadeWalls() {
+  if (!walls.length || !haveCenter) return;
+  rayFrom.copy(camera.position);
+  rayDir.set(lastCenter.x, lastCenter.y, 0.12).sub(rayFrom);
+  const distance = rayDir.length();
+  raycaster.set(rayFrom, rayDir.normalize());
+  raycaster.far = distance;
+  const hit = new Set(raycaster.intersectObjects(walls, false).map((h) => h.object));
+  for (const wall of walls) {
+    const target = hit.has(wall) ? 0.15 : 1;
+    const m = wall.material;
+    m.opacity += (target - m.opacity) * 0.2;  // 渐变，不闪
+    m.depthWrite = m.opacity > 0.9;
+  }
+}
+
+document.getElementById("reset").onclick = () => {
+  controls.target.set(lastCenter.x, lastCenter.y, 0.1);
+  camera.position.copy(controls.target).add(HOME_OFFSET);
+  input.focus();
+};
+renderer.domElement.addEventListener("pointerup", () => input.focus());
+
+// ── 渲染循环 ──────────────────────────────────────────────────────────────
+const fpsEl = document.getElementById("fps");
+let fpsCount = 0, fpsSince = performance.now();
+renderer.setAnimationLoop(() => {
+  applyPose();
+  controls.update();
+  fadeWalls();
+  drawPath();
+  if (haveCenter) sendViewer(performance.now());
+  renderer.render(scene, camera);
+  fpsCount++;
+  const now = performance.now();
+  if (now - fpsSince > 1000) { fpsEl.textContent = fpsCount + " fps"; fpsCount = 0; fpsSince = now; }
+});
+
+loadDuck().then(streamPoses).catch((e) => { overlayText.textContent = "加载 3D 模型失败：" + e.message; });
+
+// ── 摄像头：MediaPipe 在浏览器里识别手和脸，视频不离开这台电脑 ──────────────
+// 识别结果每秒约 20 次发给 /api/track，服务器直接驱动鸭子（不经过大模型）。
+const MP = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+const GESTURE_MODEL = "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task";
+const FACE_MODEL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
+const TRACK_HZ = 20;
+const GESTURE_LABELS = { Open_Palm: "✋ 停", Thumb_Up: "👍", Victory: "✌️", ILoveYou: "🤟", Closed_Fist: "✊", Pointing_Up: "☝️", Thumb_Down: "👎" };
+const HAND_LINKS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+const camBox = document.getElementById("cam"), camVideo = document.getElementById("camVideo");
+const camOverlay = document.getElementById("camOverlay"), camLabel = document.getElementById("camLabel");
+const camBtn = document.getElementById("camBtn");
+const toast = document.getElementById("toast");
+let lastEventId = 0, camOn = false, camStream = null, recognizers = null, lastSent = 0, lastVideoTime = -1, toastTimer;
+
+function showToast(text) {
+  toast.textContent = text; toast.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove("show"), 1400);
+}
+
+async function loadRecognizers() {
+  const { FilesetResolver, GestureRecognizer, FaceDetector } = await import(MP + "/vision_bundle.mjs");
+  const files = await FilesetResolver.forVisionTasks(MP + "/wasm");
+  const make = async (delegate) => ({
+    hands: await GestureRecognizer.createFromOptions(files, { baseOptions: { modelAssetPath: GESTURE_MODEL, delegate }, runningMode: "VIDEO", numHands: 1 }),
+    faces: await FaceDetector.createFromOptions(files, { baseOptions: { modelAssetPath: FACE_MODEL, delegate }, runningMode: "VIDEO" }),
+  });
+  try { return await make("GPU"); } catch (e) { return await make("CPU"); }
+}
+
+async function startCamera() {
+  camBox.hidden = false; camLabel.textContent = "加载识别模型…";
+  try {
+    recognizers = recognizers || await loadRecognizers();
+    camLabel.textContent = "请求摄像头权限…";
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" }, audio: false });
+    camVideo.srcObject = camStream;
+    await camVideo.play();
+    camOverlay.width = camVideo.videoWidth; camOverlay.height = camVideo.videoHeight;
+    camOn = true; camBtn.classList.add("on"); camBtn.textContent = "📷 关闭";
+    camLabel.textContent = "举起手试试";
+    requestAnimationFrame(trackFrame);
+  } catch (e) {
+    camLabel.textContent = "打不开：" + (e.name === "NotAllowedError" ? "没有摄像头权限" : e.message);
+    stopCamera(false);
+  }
+}
+
+function stopCamera(hide = true) {
+  camOn = false; camBtn.classList.remove("on"); camBtn.textContent = "📷 摄像头";
+  if (camStream) camStream.getTracks().forEach((t) => t.stop());
+  camStream = null;
+  if (hide) camBox.hidden = true;
+  fetch("/api/track", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "none" }) });
+}
+
+function trackFrame() {
+  if (!camOn) return;
+  requestAnimationFrame(trackFrame);
+  if (camVideo.currentTime === lastVideoTime) return;
+  lastVideoTime = camVideo.currentTime;
+  const now = performance.now();
+  const hand = recognizers.hands.recognizeForVideo(camVideo, now);
+  const g = camOverlay.getContext("2d"), W = camOverlay.width, H = camOverlay.height;
+  g.clearRect(0, 0, W, H);
+  let obs = { kind: "none" };
+  if (hand.landmarks && hand.landmarks.length) {
+    const lm = hand.landmarks[0];
+    g.strokeStyle = "#ff8a1f"; g.lineWidth = 3;
+    for (const [a, b] of HAND_LINKS) { g.beginPath(); g.moveTo(lm[a].x * W, lm[a].y * H); g.lineTo(lm[b].x * W, lm[b].y * H); g.stroke(); }
+    g.fillStyle = "#fff";
+    for (const p of lm) { g.beginPath(); g.arc(p.x * W, p.y * H, 3, 0, Math.PI * 2); g.fill(); }
+    const c = lm[9]; // 中指根部：手的中心
+    const gesture = hand.gestures && hand.gestures[0] && hand.gestures[0][0];
+    const name = gesture ? gesture.categoryName : null;
+    // 预览是镜像的：画面里的右边 = 原始帧的左边
+    const xs = lm.map((p) => p.x);
+    // 手指细节（用像素坐标，避免横竖比例失真）：分清“举手停”“摸摸”“勾勾手”这些细微差别
+    const px = (p) => [p.x * W, p.y * H];
+    const dist = (a, b) => { const [ax, ay] = px(a), [bx, by] = px(b); return Math.hypot(ax - bx, ay - by); };
+    const palm = dist(lm[0], lm[9]) || 1;  // 手腕 → 中指根：手掌长度
+    const curlOf = (tip) => dist(lm[tip], lm[0]) / palm;  // 张开约 2，握拳约 1
+    obs = {
+      kind: "hand", x: (0.5 - c.x) * 2, y: (0.5 - c.y) * 2, size: Math.max(...xs) - Math.min(...xs),
+      gesture: name && name !== "None" ? name : null, score: gesture ? gesture.score : 0,
+      curl: (curlOf(8) + curlOf(12) + curlOf(16) + curlOf(20)) / 4,  // 四指平均伸展度
+      icurl: curlOf(8),  // 食指伸展度（单指勾勾）
+      upright: (lm[0].y - lm[12].y) * H / palm,  // 中指尖比手腕高多少个手掌长：> 1 = 手指朝上
+    };
+    // 实时读数（伸展：张开约 2、握拳约 1；朝上：> 1 是竖着的手掌），方便对照阈值校准
+    camLabel.textContent = "✋" + (obs.gesture && GESTURE_LABELS[obs.gesture] ? " " + GESTURE_LABELS[obs.gesture] : "") +
+      ` · 伸展 ${obs.curl.toFixed(2)} · 食指 ${obs.icurl.toFixed(2)} · 朝上 ${obs.upright.toFixed(1)} · 大小 ${obs.size.toFixed(2)}`;
+  } else {
+    const face = recognizers.faces.detectForVideo(camVideo, now);
+    const d = face.detections && face.detections[0];
+    if (d) {
+      const b = d.boundingBox;
+      g.strokeStyle = "#4fd08a"; g.lineWidth = 3; g.strokeRect(b.originX, b.originY, b.width, b.height);
+      const cx = (b.originX + b.width / 2) / W, cy = (b.originY + b.height / 2) / H;
+      obs = { kind: "face", x: (0.5 - cx) * 2, y: (0.5 - cy) * 2, size: b.width / W };
+      camLabel.textContent = "🙂 看着你的脸";
+    } else {
+      camLabel.textContent = "没看到人";
+    }
+  }
+  if (now - lastSent >= 1000 / TRACK_HZ) {
+    lastSent = now;
+    fetch("/api/track", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(obs) })
+      .then((r) => r.json()).then((d) => { if (d.event && d.event_id !== lastEventId) { lastEventId = d.event_id; showToast(d.event); } }).catch(() => {});
+  }
+}
+
+// 聊天时附带一张当前画面（缩到 384 宽），让鸭子能“看见”你；只发给本机的 Ollama
+function snapshot() {
+  if (!camOn || !camVideo.videoWidth) return null;
+  const c = document.createElement("canvas");
+  c.width = 384; c.height = Math.round(384 * camVideo.videoHeight / camVideo.videoWidth);
+  const g = c.getContext("2d");
+  g.translate(c.width, 0); g.scale(-1, 1); // 和预览一样镜像，“左右”与你看到的一致
+  g.drawImage(camVideo, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.75).split(",")[1];
+}
+window.duckSnapshot = snapshot;
+
+camBtn.onclick = () => (camOn ? stopCamera() : startCamera());
+
+
+add("嘎！我是小鸭子 🦆 打字告诉我做什么吧，输入「帮助」看看我会什么。", "duck");
+</script>
+</body>
+</html>

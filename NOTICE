@@ -1,0 +1,18 @@
+Microduck Companion (duck-chat)
+Copyright 2026 GC-RENCAO and contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This is an unofficial community project, not affiliated with or endorsed by Pollen Robotics.
+
+It works with, but does not include, software and assets by Pollen Robotics:
+- microduck (https://github.com/pollen-robotics/microduck) — Apache License 2.0
+- microduck_rl (https://github.com/pollen-robotics/microduck_rl) — Apache License 2.0,
+  except its 3D model files (*.stl), which are licensed under CC BY-NC-SA 4.0
+  (https://creativecommons.org/licenses/by-nc-sa/4.0/). duck-chat reads those meshes at runtime
+  from the user's own microduck_rl checkout and does not redistribute them.
+
+patches/microduck_rl-objects-op.patch modifies microduck_rl (Apache License 2.0).
+
+The web page loads three.js (MIT) and MediaPipe Tasks Vision (Apache License 2.0) from jsDelivr,
+and MediaPipe's gesture-recognizer and face-detector models from Google's model storage.
