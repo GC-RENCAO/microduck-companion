@@ -92,12 +92,22 @@ With a real robot duck-chat switches to **real-robot mode** (`DUCK_WORLD=robot`)
 - “come here” and “look at me” are off, because the 3D camera is not a place in the robot's world.
 
 The rendezvous allows 1200 requests a minute per token, and a 429 cuts off everything that token does. Over it,
-continuous intents go at ~3 Hz instead of 10 and robot.state is read at 3 Hz; measured through a local stand-in, that is
-~200 requests a minute idle and ~620 while walking and talking, with a hard client-side stop at 1000.
+continuous intents go at ~3 Hz instead of 10 and robot.state is read at 3 Hz, with a hard client-side stop at 1000.
+`/api/status` reports the link: which duck, the last call's round trip, and requests in the last minute.
 
-**Verified so far:** end to end through `tests/fake_rendezvous.py`, a local stand-in for the Space and the robot's relay
-that forwards to the simulator. Walks and turns over it match the local socket (left 89°/106°, right −112°/−112° for a
-90° command). **Not yet verified** against the real Space or a physical duck. To try the same path without an account:
+**Verified through the real Hugging Face Space**, with a simulated duck signed in exactly as a robot is
+(`scripts/duck-sim ctl account login`, `mediad` registered with the rendezvous):
+
+| | Measured |
+|---|---|
+| A call's round trip (Mac → Space → duck → back) | 350–510 ms |
+| Requests a minute: idle / walking and talking | 54 / 239 |
+| “Walk 3 seconds” | 0.32 m (0.36 m over the local socket) |
+| “Turn left/right 90°” ×2 each | +90° +71° / −104° −95° |
+| Roll, greeting, chat | all worked; the duck is listed as `simulated` in the account |
+
+**Not yet verified on a physical duck.** To try the path without an account, `tests/fake_rendezvous.py` stands in for
+the Space and the robot's relay and forwards to the simulator:
 
 ```bash
 python tests/fake_rendezvous.py &              # relays to the simulator's socket

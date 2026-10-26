@@ -91,6 +91,13 @@ def test_the_remote_lane_publishes_slower_rates():
     assert RendezvousTransport.resend_s < 0.5  # robotd drops an intent 500 ms after the last one
 
 
+def test_the_link_reports_round_trip_and_usage(remote):
+    remote.request("robot.policies")
+    status = remote.describe()
+    assert status["connected"] and status["robot"] == "sim-duck"
+    assert status["rtt_ms"] is not None and status["requests_last_minute"] >= 1
+
+
 def test_a_wrong_token_says_so(hub):
     link = RendezvousTransport(token="wrong", base=hub.url)
     assert wait_for(lambda: link.error is not None)

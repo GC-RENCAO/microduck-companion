@@ -210,6 +210,11 @@ class _Budget:
         self._sent: collections.deque[float] = collections.deque()
         self._lock = threading.Lock()
 
+    def used(self) -> int:
+        now = time.monotonic()
+        with self._lock:
+            return sum(1 for at in self._sent if now - at <= self.window_s)
+
     def take(self, reserve: int = 0) -> bool:
         """Spend one unless fewer than `reserve` would be left (intents leave room for calls)."""
         now = time.monotonic()
@@ -246,6 +251,7 @@ class RendezvousTransport(Transport):
         self._subscribers: dict[str, list[queue.Queue]] = collections.defaultdict(list)
         self._lock = threading.Lock()
         self._session_id: str | None = None
+        self.rtt_ms: int | None = None  # the last call's round trip, through the Space and back
         self._connected = threading.Event()
         self._closed = threading.Event()
         self._local = threading.local()  # a requests.Session per thread: they are not thread-safe
@@ -260,9 +266,12 @@ class RendezvousTransport(Transport):
         with self._lock:
             self._pending[id] = answers
         try:
+            started = time.monotonic()
             self._send_rpc(_message(method, params, id), intent=False)
             try:
-                return _result(answers.get(timeout=max(timeout, 8.0)))  # a round trip through a Space
+                answer = answers.get(timeout=max(timeout, 8.0))  # a round trip through a Space
+                self.rtt_ms = round((time.monotonic() - started) * 1000)
+                return _result(answer)
             except queue.Empty:
                 raise DuckError(f"{method}: 机器人没有应答（经 rendezvous）") from None
         finally:
@@ -296,7 +305,8 @@ class RendezvousTransport(Transport):
     def describe(self) -> dict:
         robot = self.robot or {}
         return {"transport": self.name, "connected": self._connected.is_set(), "robot": robot.get("name"),
-                "simulated": robot.get("simulated"), "error": None if self._connected.is_set() else self.error}
+                "simulated": robot.get("simulated"), "error": None if self._connected.is_set() else self.error,
+                "rtt_ms": self.rtt_ms, "requests_last_minute": self._budget.used()}
 
     def close(self) -> None:
         self._closed.set()

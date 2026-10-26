@@ -204,10 +204,20 @@ DUCK_TRANSPORT=rendezvous ./run.sh             # 账号下有多只鸭子时加 
 - “过来”“看着我”关掉：3D 视角的相机位置不是机器人世界里的真实位置。
 
 rendezvous 每个 token 每分钟最多 1200 个请求，超了会 429、这个 token 的所有连接都受影响。所以远程时持续意图从 10 Hz
-降到约 3 Hz，robot.state 也按 3 Hz 读。用本地替身实测：空闲每分钟约 200 个请求，边走边聊约 620 个；客户端在 1000 个时硬停。
+降到约 3 Hz，robot.state 也按 3 Hz 读；客户端在 1000 个时硬停。`/api/status` 的 `link` 里能看到连的是哪只鸭子、
+最近一次调用的往返时间和最近一分钟的请求数。
 
-**已验证**：经 `tests/fake_rendezvous.py`（本地模仿 Space 和机器人中继、转发给仿真）端到端跑通，走路和转弯和本地 socket
-一致（让它转 90°：左 89°/106°，右 −112°/−112°）。**还没验证**：真正的 Hugging Face Space 和实体鸭子。不登录账号也能试：
+**已经通过真正的 Hugging Face Space 验证**（仿真鸭子用 `scripts/duck-sim ctl account login` 登录，和真机一样由 `mediad` 注册）：
+
+| | 实测 |
+|---|---|
+| 一次调用往返（Mac → Space → 鸭子 → 回来） | 350–510 ms |
+| 每分钟请求数：空闲 / 边走边聊 | 54 / 239 |
+| “向前走 3 秒” | 0.32 米（本机 socket 是 0.36 米） |
+| “左转/右转 90 度”各两次 | +90° +71° / −104° −95° |
+| 翻滚、打招呼、聊天 | 都正常；账号的机器人列表里标着 `simulated` |
+
+**还没在实体鸭子上验证。** 不登录账号也能试：`tests/fake_rendezvous.py` 在本地模仿 Space 和机器人中继，转发给仿真：
 
 ```bash
 python tests/fake_rendezvous.py &              # 转发到仿真的 socket
