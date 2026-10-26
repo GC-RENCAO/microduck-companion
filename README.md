@@ -6,6 +6,11 @@ Everything runs locally: the official daemons, the official simulator, and a loc
 
 English · [中文](README.zh-CN.md)
 
+![The duck plans its own way from the kitchen to you in the living room](docs/demo-come-here.gif)
+
+*You say “come here” from the living room; the duck, in the kitchen, plans a path through the doorway and stops in
+front of you. Recorded in the official simulator, 4× speed.*
+
 > **Unofficial community project.** Not affiliated with Pollen Robotics. It runs against the official
 > simulator today and has **not been tested on a real robot yet** (see [Status](#status)).
 

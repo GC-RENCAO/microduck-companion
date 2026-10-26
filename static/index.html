@@ -487,7 +487,7 @@ function applyPose() {
   sun.position.copy(sun.target.position).add(SUN_OFFSET);
 }
 
-window.duckDebug = { camera, controls, walls, get parts() { return parts; } };  // 调试用：在控制台里摆相机、看墙
+window.duckDebug = { camera, controls, walls, renderer, frame, get parts() { return parts; } };  // 调试用：摆相机、看墙、录演示
 
 // 路线：地板上一条橙色虚线，从鸭子脚下到目的地
 const pathLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color: 0xff8a1f, dashSize: 0.08, gapSize: 0.05 }));
@@ -500,7 +500,10 @@ function drawPath() {
   drawnPath = key;
   pathLine.visible = !!navPath;
   if (!navPath) return;
-  pathLine.geometry.setFromPoints(navPath.map(([x, y]) => new THREE.Vector3(x, y, 0.025)));
+  // 每次新建几何：three.js r170 的 setFromPoints 会复用旧缓冲区，新路线点数变少时会读越界并抛错，
+  // 抛在每帧更新的中途，后面的渲染就执行不到，画面定格（实测：走路时路线一缩短 3D 画面就卡住）
+  pathLine.geometry.dispose();
+  pathLine.geometry = new THREE.BufferGeometry().setFromPoints(navPath.map(([x, y]) => new THREE.Vector3(x, y, 0.025)));
   pathLine.computeLineDistances();
 }
 
@@ -532,13 +535,17 @@ renderer.domElement.addEventListener("pointerup", () => input.focus());
 // ── 渲染循环 ──────────────────────────────────────────────────────────────
 const fpsEl = document.getElementById("fps");
 let fpsCount = 0, fpsSince = performance.now();
-renderer.setAnimationLoop(() => {
+// 一帧：更新鸭子姿态、相机、透明墙、路线，再画出来。录演示时也直接调用它（页面在后台时动画循环会停）
+function frame() {
   applyPose();
   controls.update();
   fadeWalls();
   drawPath();
   if (haveCenter) sendViewer(performance.now());
   renderer.render(scene, camera);
+}
+renderer.setAnimationLoop(() => {
+  frame();
   fpsCount++;
   const now = performance.now();
   if (now - fpsSince > 1000) { fpsEl.textContent = fpsCount + " fps"; fpsCount = 0; fpsSince = now; }
