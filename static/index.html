@@ -101,7 +101,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
-// ── 聊天 ────────────────────────────────────────────────────────────────
+// ── Chat ────────────────────────────────────────────────────────────────
 const log = document.getElementById("log");
 const input = document.getElementById("text");
 const sayBubble = document.getElementById("say");
@@ -185,7 +185,7 @@ document.getElementById("form").addEventListener("submit", (e) => {
   input.value = "";
   send(text);
 });
-// 中文输入法选字时的回车不发送
+// Enter while choosing characters in a Chinese IME does not send
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.isComposing || e.keyCode === 229)) e.preventDefault(); });
 
 const chips = document.getElementById("chips");
@@ -196,11 +196,11 @@ for (const q of ["过来", "看着我", "去厨房", "去沙发", "回窝", "停
   chips.appendChild(b);
 }
 
-// ── 状态 ────────────────────────────────────────────────────────────────
+// ── Status ────────────────────────────────────────────────────────────────
 const overlay = document.getElementById("overlay");
 const overlayText = document.getElementById("overlayText");
 let modelReady = false, bodyOnline = false;
-let navPath = null;  // 鸭子正在走的路线（服务器规划的），画在地板上
+let navPath = null;  // the route the duck is walking (planned by the server), drawn on the floor
 const names = { stand: "站着", walk: "走路中", sit: "坐着", sitstand: "起身/坐下中", held: "被扶着" };
 function showOverlay() {
   if (!modelReady) return;
@@ -226,8 +226,8 @@ async function refresh() {
 setInterval(refresh, 1000);
 refresh();
 
-// ── 3D：场景 ─────────────────────────────────────────────────────────────
-// MuJoCo 是 z 朝上；这里整个场景也用 z 朝上，零件矩阵可以原样套用。
+// ── 3D: scene ─────────────────────────────────────────────────────────────
+// MuJoCo is z-up; so is this whole scene, so the part matrices apply as they are.
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 const stage = document.getElementById("stage");
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -262,7 +262,7 @@ sun.shadow.bias = -0.0004;
 scene.add(sun, sun.target);
 const SUN_OFFSET = new THREE.Vector3(1.2, -0.8, 2.4);
 
-// 棋盘地面（1 m 大格 + 细线），和 MuJoCo 默认地面同色系
+// Checkerboard ground (1 m squares + fine lines), in MuJoCo's default floor colours
 function checker() {
   const c = document.createElement("canvas"); c.width = c.height = 256;
   const g = c.getContext("2d");
@@ -287,10 +287,10 @@ function resize() {
 new ResizeObserver(resize).observe(stage);
 resize();
 
-// ── 3D：鸭子零件 ──────────────────────────────────────────────────────────
+// ── 3D: duck parts ──────────────────────────────────────────────────────────
 let parts = [];
-let duckParts = 0;  // parts 里前这么多个是鸭子，后面是球、箱子
-const walls = [];  // 挡住鸭子时变透明
+let duckParts = 0;  // the first this-many parts are the duck, then balls and boxes
+const walls = [];  // fade out when they hide the duck
 async function loadDuck() {
   const [layout, blob] = await Promise.all([
     fetch("/api/scene").then((r) => r.json()),
@@ -304,7 +304,7 @@ async function loadDuck() {
     geometry.computeBoundingSphere();
     geometries[id] = geometry;
   }
-  // 和 MuJoCo 同一套几何：尺寸都是“半长”，圆柱/胶囊沿 z 轴（three.js 默认沿 y，要转过来）
+  // Same geometry as MuJoCo: sizes are half-lengths, cylinders/capsules along z (three.js uses y, so rotate)
   const shape = (item) => {
     const [a, b, c] = item.size;
     switch (item.type) {
@@ -329,7 +329,7 @@ async function loadDuck() {
       map.wrapS = map.wrapT = THREE.RepeatWrapping;
       map.colorSpace = THREE.SRGBColorSpace;
       map.anisotropy = renderer.capabilities.getMaxAnisotropy();
-      // texuniform：每米重复 texrepeat 次（取面积最大那个面的两条边）；否则整个面重复 texrepeat 次
+      // texuniform: texrepeat repeats per metre (using the two edges of the largest face); otherwise per face
       const dims = item.size.map((v) => 2 * v).sort((p, q) => q - p);
       const [rx, ry] = item.texrepeat || [1, 1];
       map.repeat.set(item.texuniform ? rx * dims[0] : rx, item.texuniform ? ry * dims[1] : ry);
@@ -339,28 +339,28 @@ async function loadDuck() {
     return new THREE.MeshStandardMaterial(options);
   };
   const shared = new Map();
-  const sharedMaterial = (item) => {  // 鸭子的零件颜色重复很多，共用材质
+  const sharedMaterial = (item) => {  // the duck's part colours repeat a lot: share materials
     if (item.tex !== undefined) return materialFor(item);
     const key = item.rgba.join(",") + item.type;
     if (!shared.has(key)) shared.set(key, materialFor(item));
     return shared.get(key);
   };
 
-  // 房子：墙、地板、家具，位置只发一次
+  // The house: walls, floors, furniture, sent once with their poses
   for (const item of layout.statics || []) {
     const mesh = new THREE.Mesh(shape(item), item.wall ? materialFor(item) : sharedMaterial(item));
     const p = item.pose;
     mesh.matrixAutoUpdate = false;
     mesh.matrix.set(p[3], p[4], p[5], p[0], p[6], p[7], p[8], p[1], p[9], p[10], p[11], p[2], 0, 0, 0, 1);
     mesh.receiveShadow = true;
-    mesh.castShadow = !item.wall;  // 墙不投影子，不然房间里一片黑
+    mesh.castShadow = !item.wall;  // walls cast no shadows, or the rooms go dark
     if (item.wall) walls.push(mesh);
     scene.add(mesh);
   }
-  if (layout.floor) floor.position.z = -0.02;  // 场景自带地板：我们的棋盘地面退到下面当“屋外”
+  if (layout.floor) floor.position.z = -0.02;  // the scene has its own floor: our checkerboard drops below it as “outside”
   duckParts = layout.duck_parts ?? layout.parts.length;
 
-  // 鸭子和房间里会动的东西：每帧更新
+  // The duck and the loose things in the room: updated every frame
   parts = layout.parts.map((p) => {
     const mesh = new THREE.Mesh(shape(p), sharedMaterial(p));
     mesh.matrixAutoUpdate = false;
@@ -374,12 +374,12 @@ async function loadDuck() {
   showOverlay();
 }
 
-// ── 3D：姿态流与插值 ───────────────────────────────────────────────────────
-// 每帧：float64 仿真时间 + 每零件 [x y z, 3×3 行优先旋转]。收到后转成位置+四元数存进缓冲，
-// 渲染时按“仿真时间 - 一点延迟”在两帧之间插值，所以 60 fps 画面比 50 Hz 数据更顺滑。
+// ── 3D: pose stream and interpolation ───────────────────────────────────────────────────────
+// Each frame: float64 sim time + per part [x y z, 3×3 row-major rotation], buffered as position + quaternion.
+// Rendering interpolates between two frames at “sim time minus a small delay”, so 60 fps looks smoother than 50 Hz data.
 const frames = [];
 const PLAYBACK_DELAY = 0.06;
-let clockOffset = null; // 仿真时间 - 本地时间
+let clockOffset = null; // sim time - local time
 const m4 = new THREE.Matrix4();
 
 function decode(buffer) {
@@ -416,16 +416,16 @@ async function streamPoses() {
           const frame = decode(merged.slice(at + 4, at + 4 + len).buffer);
           const now = performance.now() / 1000;
           if (clockOffset === null || frames.length === 0 || frame.t < frames[frames.length - 1].t) {
-            frames.length = 0; clockOffset = frame.t - now; // 首帧或仿真重启：重新对时
+            frames.length = 0; clockOffset = frame.t - now; // first frame or a sim restart: resync
           }
-          clockOffset += (frame.t - now - clockOffset) * 0.05; // 平滑跟随网络抖动
+          clockOffset += (frame.t - now - clockOffset) * 0.05; // follow network jitter smoothly
           frames.push(frame);
           if (frames.length > 40) frames.shift();
           at += 4 + len;
         }
         pending = merged.slice(at);
       }
-    } catch (e) { /* 服务重启：稍后重连 */ }
+    } catch (e) { /* server restarting: reconnect shortly */ }
     await new Promise((r) => setTimeout(r, 1000));
   }
 }
@@ -436,7 +436,7 @@ let haveCenter = false;
 const VIEW_MAX_M = 3.0, VIEW_MIN_M = 0.35;
 const tmpTarget = new THREE.Vector3(), tmpFlat = new THREE.Vector3();
 
-// 把“你”的位置（相机）告诉鸭子：动了就发（最多 4 次/秒），不动也每 2 秒发一次
+// Tell the duck where “you” (the camera) are: on movement (at most 4/s), and every 2 s anyway
 const sentViewer = new THREE.Vector3(1e9, 0, 0);
 let viewerSentAt = 0;
 function sendViewer(now) {
@@ -463,14 +463,14 @@ function applyPose() {
     qa.fromArray(a.quat, i * 4); qb.fromArray(b.quat, i * 4);
     pa.lerp(pb, k); qa.slerp(qb, k);
     parts[i].matrix.compose(pa, qa, scale1);
-    // 仿真里偶尔有小物体穿过 5 毫米厚的地板掉出世界（物理步长 5 ms），掉到地下就不画了
+    // small objects occasionally tunnel through the 5 mm floor (5 ms physics step); don't draw them below ground
     parts[i].visible = pa.z > -1;
     if (i < duckParts) center.add(pa);
   }
   center.divideScalar(duckParts || parts.length);
-  // 相机 = 站在房间里的你：位置不动，只转头盯着鸭子（注视点平滑地跟着它）。
-  // 这样鸭子才能“走到你面前”；它走太远（> VIEW_MAX_M）你才跟上，太近（< VIEW_MIN_M）就退后一点。
-  // 你拖动/缩放视角 = 你在房间里移动，鸭子知道（/api/viewer）。
+  // The camera = you standing in the room: it stays put and only turns to watch the duck (the target follows smoothly).
+  // That is what lets the duck “come to you”; you only follow when it gets too far (> VIEW_MAX_M) and step back when too close (< VIEW_MIN_M).
+  // Dragging/zooming the view = you moving around the room, and the duck knows (/api/viewer).
   if (haveCenter) {
     controls.target.lerp(tmpTarget.set(center.x, center.y, 0.1), 0.12);
     const flat = tmpFlat.set(camera.position.x - center.x, camera.position.y - center.y, 0);
@@ -487,9 +487,9 @@ function applyPose() {
   sun.position.copy(sun.target.position).add(SUN_OFFSET);
 }
 
-window.duckDebug = { camera, controls, walls, renderer, frame, get parts() { return parts; } };  // 调试用：摆相机、看墙、录演示
+window.duckDebug = { camera, controls, walls, renderer, frame, get parts() { return parts; } };  // for debugging: place the camera, inspect walls, record demos
 
-// 路线：地板上一条橙色虚线，从鸭子脚下到目的地
+// The route: an orange dashed line on the floor from the duck to its goal
 const pathLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color: 0xff8a1f, dashSize: 0.08, gapSize: 0.05 }));
 pathLine.frustumCulled = false;
 scene.add(pathLine);
@@ -500,14 +500,14 @@ function drawPath() {
   drawnPath = key;
   pathLine.visible = !!navPath;
   if (!navPath) return;
-  // 每次新建几何：three.js r170 的 setFromPoints 会复用旧缓冲区，新路线点数变少时会读越界并抛错，
-  // 抛在每帧更新的中途，后面的渲染就执行不到，画面定格（实测：走路时路线一缩短 3D 画面就卡住）
+  // New geometry every time: three.js r170's setFromPoints reuses the old buffer and throws when the new route
+  // has fewer points; thrown mid-frame, the rest of the render never runs and the view freezes (seen while walking)
   pathLine.geometry.dispose();
   pathLine.geometry = new THREE.BufferGeometry().setFromPoints(navPath.map(([x, y]) => new THREE.Vector3(x, y, 0.025)));
   pathLine.computeLineDistances();
 }
 
-// 挡在你和鸭子之间的墙变半透明（墙高 1.6 米，不然常常只看到墙）
+// Walls between you and the duck turn translucent (they are 1.6 m tall; otherwise you often see only wall)
 const rayFrom = new THREE.Vector3(), rayDir = new THREE.Vector3(), raycaster = new THREE.Raycaster();
 function fadeWalls() {
   if (!walls.length || !haveCenter) return;
@@ -520,7 +520,7 @@ function fadeWalls() {
   for (const wall of walls) {
     const target = hit.has(wall) ? 0.15 : 1;
     const m = wall.material;
-    m.opacity += (target - m.opacity) * 0.2;  // 渐变，不闪
+    m.opacity += (target - m.opacity) * 0.2;  // fade, don't flicker
     m.depthWrite = m.opacity > 0.9;
   }
 }
@@ -532,10 +532,10 @@ document.getElementById("reset").onclick = () => {
 };
 renderer.domElement.addEventListener("pointerup", () => input.focus());
 
-// ── 渲染循环 ──────────────────────────────────────────────────────────────
+// ── Render loop ──────────────────────────────────────────────────────────────
 const fpsEl = document.getElementById("fps");
 let fpsCount = 0, fpsSince = performance.now();
-// 一帧：更新鸭子姿态、相机、透明墙、路线，再画出来。录演示时也直接调用它（页面在后台时动画循环会停）
+// One frame: duck pose, camera, faded walls, route, then draw. Demo recording calls it directly (the animation loop stops in a background tab)
 function frame() {
   applyPose();
   controls.update();
@@ -553,8 +553,8 @@ renderer.setAnimationLoop(() => {
 
 loadDuck().then(streamPoses).catch((e) => { overlayText.textContent = "加载 3D 模型失败：" + e.message; });
 
-// ── 摄像头：MediaPipe 在浏览器里识别手和脸，视频不离开这台电脑 ──────────────
-// 识别结果每秒约 20 次发给 /api/track，服务器直接驱动鸭子（不经过大模型）。
+// ── Camera: MediaPipe finds hands and faces in the browser; video never leaves this computer ──────────────
+// Results go to /api/track about 20 times a second and the server drives the duck directly (no LLM).
 const MP = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const GESTURE_MODEL = "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task";
 const FACE_MODEL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
@@ -624,24 +624,24 @@ function trackFrame() {
     for (const [a, b] of HAND_LINKS) { g.beginPath(); g.moveTo(lm[a].x * W, lm[a].y * H); g.lineTo(lm[b].x * W, lm[b].y * H); g.stroke(); }
     g.fillStyle = "#fff";
     for (const p of lm) { g.beginPath(); g.arc(p.x * W, p.y * H, 3, 0, Math.PI * 2); g.fill(); }
-    const c = lm[9]; // 中指根部：手的中心
+    const c = lm[9]; // middle finger base: the centre of the hand
     const gesture = hand.gestures && hand.gestures[0] && hand.gestures[0][0];
     const name = gesture ? gesture.categoryName : null;
-    // 预览是镜像的：画面里的右边 = 原始帧的左边
+    // the preview is mirrored: right in the preview = left in the raw frame
     const xs = lm.map((p) => p.x);
-    // 手指细节（用像素坐标，避免横竖比例失真）：分清“举手停”“摸摸”“勾勾手”这些细微差别
+    // Finger details (in pixels, so the aspect ratio doesn't distort): tell a raised stop palm, petting and beckoning apart
     const px = (p) => [p.x * W, p.y * H];
     const dist = (a, b) => { const [ax, ay] = px(a), [bx, by] = px(b); return Math.hypot(ax - bx, ay - by); };
-    const palm = dist(lm[0], lm[9]) || 1;  // 手腕 → 中指根：手掌长度
-    const curlOf = (tip) => dist(lm[tip], lm[0]) / palm;  // 张开约 2，握拳约 1
+    const palm = dist(lm[0], lm[9]) || 1;  // wrist → middle finger base: palm length
+    const curlOf = (tip) => dist(lm[tip], lm[0]) / palm;  // about 2 open, about 1 in a fist
     obs = {
       kind: "hand", x: (0.5 - c.x) * 2, y: (0.5 - c.y) * 2, size: Math.max(...xs) - Math.min(...xs),
       gesture: name && name !== "None" ? name : null, score: gesture ? gesture.score : 0,
-      curl: (curlOf(8) + curlOf(12) + curlOf(16) + curlOf(20)) / 4,  // 四指平均伸展度
-      icurl: curlOf(8),  // 食指伸展度（单指勾勾）
-      upright: (lm[0].y - lm[12].y) * H / palm,  // 中指尖比手腕高多少个手掌长：> 1 = 手指朝上
+      curl: (curlOf(8) + curlOf(12) + curlOf(16) + curlOf(20)) / 4,  // mean extension of the four fingers
+      icurl: curlOf(8),  // index finger extension (one-finger beckon)
+      upright: (lm[0].y - lm[12].y) * H / palm,  // middle fingertip above the wrist, in palm lengths: > 1 = fingers up
     };
-    // 实时读数（伸展：张开约 2、握拳约 1；朝上：> 1 是竖着的手掌），方便对照阈值校准
+    // Live readout (extension: about 2 open, 1 in a fist; upright: > 1 is a raised palm), to compare with the thresholds
     camLabel.textContent = "✋" + (obs.gesture && GESTURE_LABELS[obs.gesture] ? " " + GESTURE_LABELS[obs.gesture] : "") +
       ` · 伸展 ${obs.curl.toFixed(2)} · 食指 ${obs.icurl.toFixed(2)} · 朝上 ${obs.upright.toFixed(1)} · 大小 ${obs.size.toFixed(2)}`;
   } else {
@@ -664,13 +664,13 @@ function trackFrame() {
   }
 }
 
-// 聊天时附带一张当前画面（缩到 384 宽），让鸭子能“看见”你；只发给本机的 Ollama
+// Chat messages carry the current frame (384 px wide) so the duck can “see” you; it only goes to the local Ollama
 function snapshot() {
   if (!camOn || !camVideo.videoWidth) return null;
   const c = document.createElement("canvas");
   c.width = 384; c.height = Math.round(384 * camVideo.videoHeight / camVideo.videoWidth);
   const g = c.getContext("2d");
-  g.translate(c.width, 0); g.scale(-1, 1); // 和预览一样镜像，“左右”与你看到的一致
+  g.translate(c.width, 0); g.scale(-1, 1); // mirrored like the preview, so left and right match what you see
   g.drawImage(camVideo, 0, 0, c.width, c.height);
   return c.toDataURL("image/jpeg", 0.75).split(",")[1];
 }

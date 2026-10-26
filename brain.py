@@ -1,18 +1,18 @@
-"""大模型大脑：先让“身体”决定动作，再让“嘴巴”按人设回话。
+"""The LLM brain: the “body” decides the actions first, then the “mouth” replies in character.
 
-为什么拆成两次调用：9B 级的小模型在同一次回答里既要像朋友一样聊天、又要精确调用工具，
-两件事会互相干扰——人设一丰富就开始“嘴上答应、身体不动”，或者把“后退”当成往前走。
-拆开以后：
-- 身体（planner）：简短的控制提示词 + 工具，temperature 接近 0，只输出工具调用，约 1–2 秒，
-  决定后立刻交给 ActionQueue，鸭子马上开始动。
-- 嘴巴（talker）：完整人设，不带工具，被告知身体刚做了什么，自然地聊天。
-两边各自保存历史：身体保存真实的工具调用（若存成文字，模型会模仿文字而不再调用工具），
-嘴巴保存聊天文字。
+Why two calls: a 9B-class model asked to chat like a friend and call tools precisely in the same answer
+does both badly — the richer the persona, the more it “agrees but doesn't move”, or walks forward when
+asked to back up. Split up:
+- Body (planner): a short control prompt plus tools, temperature near 0, tool calls only, about 1–2 s;
+  the decision goes straight to the ActionQueue and the duck starts moving.
+- Mouth (talker): the full persona, no tools, told what the body just did, chats naturally.
+Each keeps its own history: the body keeps the real tool calls (stored as prose, the model imitates the
+prose and stops calling tools), the mouth keeps the chat text.
 
-配置（环境变量，都有默认值）：
-- DUCK_LLM_URL     Ollama 地址，默认 http://127.0.0.1:11434
-- DUCK_LLM_MODEL   模型名，默认 qwen3.5:9b-mlx（需要支持 tools；看图还需要 vision）
-- DUCK_LLM_THINK   1 打开思考模式（更慢），默认关
+Configuration (environment variables, all optional):
+- DUCK_LLM_URL     Ollama address, default http://127.0.0.1:11434
+- DUCK_LLM_MODEL   model name, default qwen3.5:9b-mlx (needs tools; vision to look at the camera)
+- DUCK_LLM_THINK   1 turns thinking mode on (slower), default off
 """
 
 from __future__ import annotations
@@ -30,9 +30,9 @@ URL = os.environ.get("DUCK_LLM_URL", "http://127.0.0.1:11434").rstrip("/")
 MODEL = os.environ.get("DUCK_LLM_MODEL", "qwen3.5:9b-mlx")
 THINK = os.environ.get("DUCK_LLM_THINK", "0") == "1"
 TIMEOUT_S = 120
-PLANNER_TURNS = 6  # 身体记住最近几轮（“再来一次”“再走远点”要用）
-TALKER_TURNS = 12  # 嘴巴记住最近几轮聊天
-TALK_MAX_TOKENS = 160  # 回话长度上限：1–3 句够用，也防止长篇大论拖慢
+PLANNER_TURNS = 6  # turns the body remembers (for “again”, “a bit further”)
+TALKER_TURNS = 12  # chat turns the mouth remembers
+TALK_MAX_TOKENS = 160  # reply length cap: 1–3 sentences is plenty, and long speeches are slow
 
 PLANNER = """你是一只双足机器鸭子的身体控制器。根据主人最新的一句话，决定身体要做的动作，并调用工具。
 
@@ -117,9 +117,9 @@ TOOLS = [
 QUERY_TOOLS = {"get_status", "cannot_do"}
 ACTION_TOOLS = {t["function"]["name"] for t in TOOLS} - QUERY_TOOLS
 
-# 给嘴巴看的动作说明
+# How each action is described to the mouth
 STEP_WORDS = {
-    # 走路和转弯用 actions 里同一套换算/截断，嘴巴看到的就是身体实际执行的数字
+    # walking and turning use the same conversion/clamping as actions.py, so the mouth sees the numbers the body really runs
     "walk_forward": lambda a: plan_walk(a.get("seconds"), a.get("steps"), a.get("meters"))[1],
     "turn": lambda a: plan_turn(a.get("direction", "left"), a.get("degrees", DEFAULT_TURN_DEG))[3],
     "stop": lambda a: "停下",
@@ -142,16 +142,16 @@ class BrainError(RuntimeError):
 class Thought:
     reply: str
     steps: list[Step] = field(default_factory=list)
-    timings_ms: list[int] = field(default_factory=list)  # 每次模型调用的耗时：身体…、嘴巴
-    act_ms: int = 0  # 从收到话到鸭子开始动的时间（身体决策耗时）
-    rejected: list[str] = field(default_factory=list)  # 模型乱调的工具
+    timings_ms: list[int] = field(default_factory=list)  # time per model call: body…, mouth
+    act_ms: int = 0  # from message to the duck moving (the body's decision time)
+    rejected: list[str] = field(default_factory=list)  # tools the model made up
 
 
 class Brain:
     def __init__(self, runner: ActionQueue, describe=None, places: list[str] | None = None):
         self.runner = runner
-        self.describe = describe or (lambda: [])  # life.Life.describe：心情、主人在哪、最近发生的事
-        # 有房子地图时多一个 go_to 工具，地点从地图来（换一套房子也自动适用）
+        self.describe = describe or (lambda: [])  # life.Life.describe: mood, where you are, recent events
+        # With a house map there is a go_to tool whose places come from the map (works for any house)
         self.tools = TOOLS + ([{"type": "function", "function": {
             "name": "go_to", "description": "去房子里的某个地方（会自己找路，绕过墙和家具）",
             "parameters": {"type": "object", "properties": {"place": {"type": "string", "enum": list(places)}},
@@ -161,7 +161,7 @@ class Brain:
         self.talk_history: list[dict] = []
 
     def reset(self) -> None:
-        """忘掉之前的对话（身体和嘴巴一起）。"""
+        """Forget the conversation (body and mouth)."""
         self.plan_history = []
         self.talk_history = []
 
@@ -174,7 +174,7 @@ class Brain:
             return False
 
     def think(self, text: str, image_b64: str | None = None) -> Thought:
-        """一次说完（bench 用）：把 think_stream 走完。"""
+        """The whole reply at once (for bench.py): runs think_stream to the end."""
         thought = None
         for event in self.think_stream(text, image_b64):
             if event["type"] == "done":
@@ -182,12 +182,12 @@ class Brain:
         return thought
 
     def think_stream(self, text: str, image_b64: str | None = None):
-        """依次产出：{"type": "act"}（身体已开始动）→ 若干 {"type": "delta"}（回话片段）→ {"type": "done"}。"""
+        """Yields {"type": "act"} (the body started moving) → {"type": "delta"} reply chunks → {"type": "done"}."""
         thought = Thought(reply="")
         started = time.perf_counter()
         facts = self._plan(text, thought)
         thought.act_ms = int((time.perf_counter() - started) * 1000)
-        self.runner.submit(thought.steps)  # 身体先动起来，嘴巴接着说
+        self.runner.submit(thought.steps)  # the body moves first, the mouth follows
         yield {"type": "act", "steps": [{"name": s.name, "args": s.args} for s in thought.steps],
                "act_ms": thought.act_ms, "rejected": thought.rejected}
         for piece in self._talk(text, image_b64, thought, facts):
@@ -197,10 +197,10 @@ class Brain:
             yield {"type": "delta", "text": thought.reply}
         yield {"type": "done", "thought": thought}
 
-    # ── 身体 ────────────────────────────────────────────────────────────────
+    # ── Body ────────────────────────────────────────────────────────────────
 
     def _plan(self, text: str, thought: Thought) -> list[str]:
-        """决定动作。返回查询工具的结果（给嘴巴用）。"""
+        """Decide the actions. Returns the results of query tools (for the mouth)."""
         user = {"role": "user", "content": text}
         messages = [{"role": "system", "content": PLANNER}, *self.plan_history, user]
         turn, facts = [user], []
@@ -241,17 +241,18 @@ class Brain:
         self.plan_history = _trim(self.plan_history + turn, PLANNER_TURNS)
         return facts
 
-    # ── 嘴巴 ────────────────────────────────────────────────────────────────
+    # ── Mouth ────────────────────────────────────────────────────────────────
 
     def _talk(self, text: str, image_b64: str | None, thought: Thought, facts: list[str]):
-        """流式回话：边生成边产出文字片段，结束时写进 thought.reply 和历史。"""
+        """Stream the reply chunk by chunk; at the end it goes into thought.reply and the history."""
         did = " → ".join(STEP_WORDS.get(s.name, lambda a: s.name)(s.args) for s in thought.steps)
         cannot = [f for f in facts if f.startswith("身体做不到")]
         reaction = (f"身体已经开始做：{did}" if did else "身体这次没有做任何动作——不要说你正在做或马上要做某个动作")
         if cannot:
             reaction += "；" + "；".join(cannot)
-        # “身体刚做了什么”附在这句话后面而不是放在系统提示词里：对话一长，模型更受最近的内容影响，
-        # 放在开头会被历史带偏（身体做了却说做不到）。历史里只存主人的原话。
+        # “What the body just did” goes after the message, not into the system prompt: in a long chat the
+        # model follows recent content, and up front the history drowns it (it did it but says it can't).
+        # The history keeps only the user's own words.
         note = f"【给小鸭子的提示，不是主人说的：{reaction}。只说与此一致的话"
         if image_b64:
             note += "；附带的图片是主人电脑摄像头此刻拍到的主人（镜像画面），问到看见什么时据此回答，没问就不用特意描述"
@@ -268,12 +269,12 @@ class Brain:
             yield piece
         thought.timings_ms.append(int((time.perf_counter() - started) * 1000))
         thought.reply = "".join(pieces).strip()
-        # 历史只存文字（不存图片），控制上下文长度
+        # The history keeps text only (no images) to keep the context short
         self.talk_history = _trim(self.talk_history + [{"role": "user", "content": text},
                                                        {"role": "assistant", "content": thought.reply}], TALKER_TURNS)
 
     def _body_state(self, facts: list[str]) -> str:
-        """真实的身体状态，让嘴巴谈论自己时说的是事实而不是猜。"""
+        """The real body state, so the mouth states facts about itself instead of guessing."""
         lines = ["身体状态（实时）："]
         if facts:
             lines.append(f"- 刚查到：{'；'.join(facts)}")
@@ -281,7 +282,7 @@ class Brain:
             try:
                 status, _ = self.runner.actions.get_status()
                 lines.append(f"- 姿势：{status}")
-            except Exception:  # 状态只是聊天的背景信息，读不到不能影响回话
+            except Exception:  # the state is only background; failing to read it must not break the reply
                 lines.append("- 姿势：暂时读不到")
         current = getattr(self.runner, "current", None)
         lines.append(f"- 正在做：{current or '没在做动作'}")
@@ -311,7 +312,7 @@ class Brain:
         return answer.get("message", {}), int((time.perf_counter() - started) * 1000)
 
     def _chat_stream(self, messages: list[dict], temperature: float, max_tokens: int):
-        """不带工具的流式调用，逐段产出正文。"""
+        """A streaming call without tools, yielding the text chunk by chunk."""
         payload = {"model": MODEL, "messages": messages, "stream": True, "think": THINK, "keep_alive": "30m",
                    "options": {"temperature": temperature, "num_predict": max_tokens}}
         request = urllib.request.Request(f"{URL}/api/chat", json.dumps(payload).encode(), {"Content-Type": "application/json"})
@@ -335,13 +336,13 @@ class Brain:
 
 
 def _trim(history: list[dict], turns: int) -> list[dict]:
-    """按轮裁剪：从倒数第 turns 轮的用户消息处截断，不把一轮拆开。"""
+    """Trim by turns: cut at the user message `turns` turns back, never splitting a turn."""
     users = [i for i, m in enumerate(history) if m["role"] == "user"]
     return history[users[-turns]:] if len(users) > turns else history
 
 
 def _mostly_english(text: str) -> bool:
-    """主人这句是不是英文：拉丁字母明显多于汉字。"""
+    """Whether the message is English: clearly more Latin letters than Chinese characters."""
     latin = sum(c.isascii() and c.isalpha() for c in text)
     han = sum("\u4e00" <= c <= "\u9fff" for c in text)
     return latin >= 3 and latin > han * 2

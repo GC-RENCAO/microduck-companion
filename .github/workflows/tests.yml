@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Only what duck-chat imports — not microduck_rl's training stack (torch, mjlab, warp…).
+      - name: Install dependencies
+        run: pip install mujoco numpy scipy pillow pytest
+
+      # The scenes and meshes the integration tests load (the apartment, the duck's MJCF + STLs).
+      - name: Fetch the official scenes
+        run: git clone --depth 1 --branch develop https://github.com/pollen-robotics/microduck_rl.git "$RUNNER_TEMP/microduck_rl"
+
+      - name: Shell scripts parse
+        run: for script in *.sh; do sh -n "$script"; done
+
+      - name: Tests
+        env:
+          DUCK_SIM_RL: ${{ runner.temp }}/microduck_rl
+        run: python -m pytest tests -q

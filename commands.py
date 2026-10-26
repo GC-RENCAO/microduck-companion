@@ -1,6 +1,6 @@
-"""关键词模式：把一句话（中文或英文）解析成动作。不需要大模型，响应即时。
+"""Keyword mode: parse a sentence (Chinese or English) into actions. No LLM, instant.
 
-大模型不可用时的后备，也是 DUCK_BRAIN=rules 时的唯一模式。动作本身在 actions.py。
+The fallback when the LLM is unavailable, and the only mode with DUCK_BRAIN=rules. The actions live in actions.py.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from duck_client import DuckError
 @dataclass
 class Reply:
     text: str
-    action: str = ""  # 给页面显示用的动作标签
+    action: str = ""  # action label shown in the page
     ok: bool = True
 
 

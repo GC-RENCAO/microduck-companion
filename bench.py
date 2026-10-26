@@ -1,9 +1,9 @@
-"""大模型测速 + 工具调用准确率。只测大脑，不让鸭子动（动作被记录、不执行）。
+"""LLM latency + tool-call accuracy. Tests the brain only; the duck does not move (actions are recorded, not run).
 
     DUCK_LLM_MODEL=qwen3.5:9b-mlx ~/Pollen/microduck_rl/.venv/bin/python bench.py
-    DUCK_SIM_SCENE=apartment ...                     # 有房子地图时，多测 go_to（地点从地图来）
+    DUCK_SIM_SCENE=apartment ...                     # with a house map, also tests go_to (places from the map)
 
-每条用例：期望按顺序出现的工具（可以夹杂别的小动作），以及绝不能出现的工具。
+Each case: the tools expected in order (other small actions may come in between), and tools that must not appear.
 """
 
 from __future__ import annotations
@@ -17,10 +17,10 @@ from actions import Step, plan_walk
 
 
 def walked(a):
-    """walk_forward 实际会走的秒数（和身体同一套换算）。"""
+    """The seconds walk_forward will really walk (same conversion as the body)."""
     return plan_walk(a.get("seconds"), a.get("steps"), a.get("meters"))[0]
 
-# (输入, 期望的工具顺序[(名字, 参数检查)], 禁止的工具)
+# (input, expected tools in order [(name, argument check)], forbidden tools)
 MOVES = {"walk_forward", "turn", "do_trick", "sit_down", "stand_up"}
 CASES = [
     ("往前走5秒", [("walk_forward", lambda a: 4 <= walked(a) <= 6)], set()),
@@ -32,7 +32,7 @@ CASES = [
     ("你好呀小鸭子", [], MOVES),
     ("看看左边", [("look", lambda a: a.get("direction") == "left")], {"walk_forward", "turn"}),
     ("踢球", [("do_trick", lambda a: str(a.get("name", "")).startswith("kick"))], set()),
-    # “停”不经过大模型（server.py 的快速通道），所以不在这里测
+    # “stop” bypasses the LLM (server.py's fast path), so it is not tested here
     ("往后退两步", [], {"walk_forward"}),
     ("你现在是站着还是坐着？", [("get_status", None)], MOVES),
     ("你叫什么名字", [], MOVES),
@@ -43,18 +43,18 @@ CASES = [
     ("jump three times", [], {"walk_forward", "turn", "do_trick"}),
     ("我今天上班好累啊", [], {"walk_forward", "turn", "do_trick"}),
     ("你最喜欢做什么？", [], {"walk_forward", "turn"}),
-    ("那你表演一下给我看", [], set()),  # 接上一句，看它能不能接住话题（不强制具体动作）
-    # 用户反馈：能做的部分要做，做不到的（跳）不能拖累整句
+    ("那你表演一下给我看", [], set()),  # follows the previous line: can it keep the topic (no specific action required)
+    # From user feedback: do the doable part; the impossible part (jump) must not sink the whole sentence
     ("can you walk in 5 steps and turn around jump", [("walk_forward", lambda a: 0.9 <= walked(a) <= 1.5), ("turn", lambda a: 150 <= float(a.get("degrees", 0)) <= 210)], {"do_trick"}),
-    ("why u can't do this", [], MOVES),  # 只是提问，不该动
-    ("walk in 5 steps", [("walk_forward", lambda a: 0.9 <= walked(a) <= 1.5)], set()),  # 曾被算成 50 秒
+    ("why u can't do this", [], MOVES),  # just a question: no moving
+    ("walk in 5 steps", [("walk_forward", lambda a: 0.9 <= walked(a) <= 1.5)], set()),  # was once computed as 50 s
     ("走5步", [("walk_forward", lambda a: 0.9 <= walked(a) <= 1.5)], set()),
     ("spin around", [("turn", lambda a: 300 <= float(a.get("degrees", 0)) <= 420)], set()),
     ("过来", [("come_here", None)], {"walk_forward"}),
     ("看着我", [("face_me", None)], {"walk_forward", "turn"}),
     ("come here buddy", [("come_here", None)], {"walk_forward"}),
 ]
-# 有房子地图时（DUCK_SIM_SCENE=apartment）才测的：地点名来自地图
+# Only with a house map (DUCK_SIM_SCENE=apartment): place names come from the map
 PLACE_CASES = [
     ("去厨房", [("go_to", lambda a: a.get("place") == "厨房")], {"walk_forward", "turn"}),
     ("回窝睡觉去吧", [("go_to", lambda a: "窝" in str(a.get("place")))], {"walk_forward"}),
@@ -114,7 +114,7 @@ def main() -> int:
         import mujoco
         model = mujoco.MjModel.from_xml_path(str(pose.scene_path()))
         trunk = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "trunk_base")
-        skip = {trunk} | {int(model.jnt_bodyid[j]) for j in range(model.njnt) if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE}
+        skip = {trunk} | {int(model.jnt_bodyid[j]) for j in range(model.njnt) if int(model.jnt_type[j]) == int(mujoco.mjtJoint.mjJNT_FREE)}
         try:
             places = list(navmap.NavMap(model, skip).places)
             CASES.extend(PLACE_CASES)
@@ -126,10 +126,10 @@ def main() -> int:
         return 1
 
     print(f"模型 {brain.MODEL}  think={brain.THINK}")
-    started_cold = duck_brain.think("嘎")  # 预热：第一次要把模型载入内存
+    started_cold = duck_brain.think("嘎")  # warm-up: the first call loads the model into memory
     print(f"冷启动（载入模型）：{sum(started_cold.timings_ms) / 1000:.1f} 秒\n")
 
-    # 两种模式：每句独立（清空历史），和连续对话（历史一直累积——历史格式出错时模型会学坏）
+    # Two modes: independent lines (history cleared) and one long chat (history grows — a bad history format teaches the model bad habits)
     for mode in ("独立", "连续对话"):
         print(f"── {mode} ──")
         duck_brain.reset()
@@ -145,7 +145,7 @@ def run(duck_brain, runner, clear: bool) -> None:
         runner.submitted.clear()
         runner.actions.queried.clear()
         thought = duck_brain.think(text)
-        # 查询工具（get_status）当场执行、不进动作队列，所以从假动作层的记录里补回来
+        # Query tools (get_status) run immediately and skip the queue, so take them from the fake actions' record
         calls = [(s.name, s.args) for s in runner.actions.queried] + [(s.name, s.args) for s in thought.steps]
         ok, why = check(calls, expected, forbidden)
         if ok and brain._mostly_english(text) and not brain._mostly_english(thought.reply):

@@ -85,8 +85,34 @@ It is a working take on what microduck's roadmap calls **M9 — the autonomous b
   A real duck on your LAN needs a transport over the official remote path (WebRTC / rendezvous) — the next milestone.
 - In simulation the duck knows exactly where it is; a real robot will need localisation (odometry + the visual SLAM the
   apartment scene is designed for).
-- Prompts, code comments and the detailed notes ([README.zh-CN.md](README.zh-CN.md)) are mostly in Chinese; the duck
-  answers in whatever language you use.
+- The LLM prompts, UI labels and the detailed notes ([README.zh-CN.md](README.zh-CN.md)) are in Chinese; the duck
+  answers in whatever language you use. Code comments are being moved to English.
+
+## Development
+
+```bash
+# the tests need the official scenes: point DUCK_SIM_RL at a microduck_rl checkout (setup.sh makes one)
+DUCK_SIM_RL=../microduck_rl ../microduck_rl/.venv/bin/python -m pytest tests -q
+```
+
+They run offline in a few seconds — no simulator, no daemons, no Ollama (the LLM is a fake local server) — and cover
+gesture recognition near misses (petting vs. “stop”, waving vs. beckoning), walk/turn conversion, the keyword parser,
+the brain's tool handling, the apartment map (doorways, rooms, A* through doors) and the scene export.
+CI runs the same suite on every push (`.github/workflows/tests.yml`).
+
+### Calibrating gestures to your camera
+
+The gesture thresholds (top of `tracker.py`) were tuned on one webcam. To check them on yours, turn the camera on,
+then for ~20 s each: hold a raised palm close to the camera (stop), pet the air slowly with a flat hand, and beckon
+with your fingers. Then:
+
+```bash
+curl -s localhost:8765/api/calibration | python3 -m json.tool   # p5/p50/p95 of each finger feature per gesture
+curl -s -X POST localhost:8765/api/calibration                    # start a fresh recording
+```
+
+A stop palm should sit above `min_upright`/`min_size`; a beckon's `curl_swing` and `flips` above the `BECKON_*`
+thresholds while its `drift` stays below. Please share the numbers in an issue if your camera needs different values.
 
 ## The upstream patch
 

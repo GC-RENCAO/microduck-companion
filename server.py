@@ -13,6 +13,7 @@ POST /api/say        {"text": "...", "image": 可选 base64 JPEG} → NDJSON 事
 POST /api/track      摄像头识别结果 {"kind":"hand|face|none","x","y","size","gesture"} → {"event","event_id"}，
                      浏览器每秒约 20 次（tracker.py 感知 + 手势，不经过大模型）
 POST /api/viewer     3D 视角（相机）的位置 {"x","y","z"}：这就是“你”在鸭子世界里的位置（life.py）
+GET  /api/calibration   真实摄像头下各手势的手指特征统计（对照 tracker.py 的阈值调）；POST 清空重新统计
 GET  /api/status     鸭子是否在线、当前 policy、是否摔倒、正在做的动作、大模型是否可用、心情
 
 DUCK_BRAIN=llm（默认）：先交给大模型（brain.py）；Ollama 不可用或出错时退回关键词模式，
@@ -152,6 +153,8 @@ class Handler(BaseHTTPRequestHandler):
             self._pose_stream()
         elif self.path == "/api/status":
             self._status()
+        elif self.path == "/api/calibration":
+            self._json(tracker.calibration())
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -161,6 +164,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(tracker.observe(self._body()))
             except (TypeError, ValueError):
                 self._json({"event": None}, HTTPStatus.BAD_REQUEST)
+        elif self.path == "/api/calibration":
+            tracker.reset_calibration()
+            self._json({"ok": True})
         elif self.path == "/api/viewer":
             body = self._body()
             try:

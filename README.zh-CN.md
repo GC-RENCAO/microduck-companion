@@ -166,6 +166,11 @@ cd ../duck-chat && DUCK_SIM_SCENE=apartment ./run.sh
 摄像头小窗里会实时显示伸展度/食指/朝上/大小的读数，阈值都在 `tracker.py` 顶部，可以对照着调。
 所有手势要求置信度 ≥ 0.75；触发后同一手势冷却 2 秒、要放下再做才会再次触发。
 
+**按你的摄像头校准**：阈值是在一个摄像头上调的。打开摄像头后，每种动作各做约 20 秒——竖着手掌靠近镜头（停）、
+平着手慢慢“摸”、勾勾手——然后 `curl -s localhost:8765/api/calibration | python3 -m json.tool` 看每种手势下各特征的
+5% / 50% / 95% 分位（`beckon` 是勾手时的摆幅、漂移和来回次数），和 `tracker.py` 顶部的阈值对照；
+`curl -X POST localhost:8765/api/calibration` 清空重新统计。
+
 摄像头开着时聊天，会附带一张当前画面（384 宽、镜像）给本地大模型的“嘴巴”，所以可以问“我手里拿的是什么”。
 带图时回复会慢 2–4 秒（模型要先看图）。
 
@@ -249,6 +254,15 @@ cd ../duck-chat && DUCK_SIM_SCENE=apartment ./run.sh
   角度是近似的（90° 实测 86–100°，掉头实测约 150°）。
 - `kick_right` 在仿真里腿几乎不动（robotd 有执行，策略本身动作很小）；`kick_left` 正常。
 - 仿真的声音不一定能从 Mac 扬声器听到；页面上会显示鸭子的回复气泡。
+
+## 测试
+
+```bash
+DUCK_SIM_RL=../microduck_rl ../microduck_rl/.venv/bin/python -m pytest tests -q
+```
+
+离线几秒跑完，不需要仿真、守护进程和 Ollama（大模型用本地假服务代替）。覆盖：手势的易混情况（摸 vs 停、挥手 vs 勾手）、
+走路/转弯换算、关键词解析、大脑的工具处理、公寓地图（门口、房间、穿门的 A*）和场景导出。每次推送 CI 都会跑一遍。
 
 ## 结构
 
