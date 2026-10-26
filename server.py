@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -248,10 +249,22 @@ def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
     print(f"🦆 鸭子屏幕： http://{HOST}:{PORT}", flush=True)
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+
+    # Ctrl+C, killed (TERM) or the terminal closed (HUP) all end through the `finally`. INT is set explicitly
+    # because a process started in the background by a script inherits it ignored.
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        sys.exit(0)
+        pass
+    finally:
+        # Over the rendezvous this ends the session, so the duck is free for the console or another app
+        # at once instead of showing busy until the service notices the dropped stream.
+        link.close()
 
 
 if __name__ == "__main__":

@@ -313,9 +313,10 @@ class RendezvousTransport(Transport):
         session, self._session_id = self._session_id, None
         if session:
             try:
-                self._post({"type": "endSession", "sessionId": session})
+                # Short: this runs while the program is exiting, and an unreachable service must not hold it
+                self._post({"type": "endSession", "sessionId": session}, timeout=3)
             except DuckError:
-                pass
+                pass  # the service frees the duck anyway once it notices the stream is gone
         if self._stream is not None:
             self._stream.close()
 
@@ -337,10 +338,10 @@ class RendezvousTransport(Transport):
             raise DuckError("发得太快了：rendezvous 每分钟最多 1200 个请求")
         self._post({"type": "peer", "sessionId": session, "rpc": rpc})
 
-    def _post(self, message: dict) -> dict | None:
+    def _post(self, message: dict, timeout: float = CONNECT_TIMEOUT) -> dict | None:
         """`POST /send`. `startSession` and `list` are answered in the body; everything else on the stream."""
         try:
-            answer = self._http().post(f"{self.base}/send", json=message, timeout=CONNECT_TIMEOUT,
+            answer = self._http().post(f"{self.base}/send", json=message, timeout=timeout,
                                        headers={"Authorization": f"Bearer {self.token}"})
         except requests.RequestException as error:
             raise DuckError(f"POST /send：{error}") from None

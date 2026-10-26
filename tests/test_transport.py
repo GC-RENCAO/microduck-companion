@@ -98,6 +98,13 @@ def test_the_link_reports_round_trip_and_usage(remote):
     assert status["rtt_ms"] is not None and status["requests_last_minute"] >= 1
 
 
+def test_closing_frees_the_duck_at_once(remote, hub):
+    listed = lambda: transport.list_ducks("secret", hub.url)[0]["busy"]
+    assert listed()  # our session holds it
+    remote.close()
+    assert not listed()  # no waiting for the service to notice a dropped stream
+
+
 def test_a_wrong_token_says_so(hub):
     link = RendezvousTransport(token="wrong", base=hub.url)
     assert wait_for(lambda: link.error is not None)

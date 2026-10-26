@@ -87,7 +87,8 @@ class FakeRendezvous:
     # ── routes ──
 
     def robot_status(self) -> dict:
-        return {"robots": [{"peerId": ROBOT_PEER, "busy": self.busy,
+        # Busy while someone holds a session with it, as the real service reports it
+        return {"robots": [{"peerId": ROBOT_PEER, "busy": self.busy or self._session is not None,
                             "meta": {"name": self.name, "kind": "microduck", "simulated": True}}]}
 
     def open_stream(self) -> queue.Queue:
