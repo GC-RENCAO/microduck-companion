@@ -184,10 +184,47 @@ cd ../duck-chat && DUCK_SIM_SCENE=apartment ./run.sh
 | 鸭子头部自身：从收到目标到转过一半 | 约 220 ms（直接给 robotd 发 `robot.head` 也是如此，是策略 + 舵机的响应速度） |
 | 合计：手跳到另一侧，头转过一半 | 约 0.25–0.3 秒 |
 
+## 连真机（远程，经官方 rendezvous）
+
+真机走官方的远程通道（microduck `docs/design/remote-access-design.md` §3.8）：机器人登录 Hugging Face 账号、在
+rendezvous Space 上注册；duck-chat 用同一个账号登录，把 JSON-RPC 放在 `peer` 信封里经 Space 转给机器人的 `mediad`。
+只用 HTTP 和事件流（SSE），不需要 WebRTC，也不用开端口，和官方 Space 用的是同一条通道（`transport.py`）。
+
+```bash
+robotctl account login          # 在鸭子上登录一次（仿真里：scripts/duck-sim ctl account login）
+hf auth login                   # 在 Mac 上登录同一个 Hugging Face 账号（或者设 HF_TOKEN）
+DUCK_TRANSPORT=rendezvous ./run.sh             # 账号下有多只鸭子时加 DUCK_ROBOT=<名字>
+```
+
+连真机时自动进入**真机模式**（`DUCK_WORLD=robot`）：
+
+- 3D 鸭子按机器人自己报告的关节、IMU 朝向和触地里程计来画，脚下是空地板——真机没有房子，也没有仿真真值；
+- 鸭子不会自己走动（它可能站在桌上，这里看不到桌子边）。聊天、手势、叫声、技能、转头跟踪、身体表情都照常，
+  只有你让它走它才走（`DUCK_ROAM=1` 解除）；
+- “过来”“看着我”关掉：3D 视角的相机位置不是机器人世界里的真实位置。
+
+rendezvous 每个 token 每分钟最多 1200 个请求，超了会 429、这个 token 的所有连接都受影响。所以远程时持续意图从 10 Hz
+降到约 3 Hz，robot.state 也按 3 Hz 读。用本地替身实测：空闲每分钟约 200 个请求，边走边聊约 620 个；客户端在 1000 个时硬停。
+
+**已验证**：经 `tests/fake_rendezvous.py`（本地模仿 Space 和机器人中继、转发给仿真）端到端跑通，走路和转弯和本地 socket
+一致（让它转 90°：左 89°/106°，右 −112°/−112°）。**还没验证**：真正的 Hugging Face Space 和实体鸭子。不登录账号也能试：
+
+```bash
+python tests/fake_rendezvous.py &              # 转发到仿真的 socket
+DUCK_TRANSPORT=rendezvous REACHY_CENTRAL_URL=http://127.0.0.1:8790 HF_TOKEN=local ./start.sh
+```
+
 ## 配置（环境变量，都有默认值）
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
+| `DUCK_TRANSPORT` | `unix` | 怎么连鸭子：`unix`（本机 socket）或 `rendezvous`（远程，见上一节） |
+| `DUCK_SOCKET` | duck-sim 的 socket | `unix` 模式下的 socket 路径 |
+| `DUCK_ROBOT` | 账号下唯一那只 | `rendezvous` 模式下连哪只鸭子（名字或 peer id） |
+| `HF_TOKEN` | `hf auth login` 存的 | `rendezvous` 模式用的 Hugging Face token（不要用机器人自己的 token） |
+| `REACHY_CENTRAL_URL` | 官方 Space | rendezvous 地址（和官方客户端读同一个变量） |
+| `DUCK_WORLD` | unix 用 `sim`，rendezvous 用 `robot` | 鸭子的位置和 3D 姿态来源：仿真真值，还是机器人自己报告的 |
+| `DUCK_ROAM` | 真机 `0`，仿真 `1` | 是否允许鸭子自己走动（溜达、凑过来、找你） |
 | `DUCK_LLM_MODEL` | `qwen3.5:9b-mlx` | Ollama 模型名，需要支持 tools（看图还要 vision） |
 | `DUCK_LLM_URL` | `http://127.0.0.1:11434` | Ollama 地址 |
 | `DUCK_LLM_THINK` | `0` | `1` 打开模型的思考模式（更准但更慢） |
@@ -263,7 +300,7 @@ DUCK_SIM_RL=../microduck_rl ../microduck_rl/.venv/bin/python -m pytest tests -q
 ```
 
 离线几秒跑完，不需要仿真、守护进程和 Ollama（大模型用本地假服务代替）。覆盖：手势的易混情况（摸 vs 停、挥手 vs 勾手）、
-走路/转弯换算、关键词解析、大脑的工具处理、公寓地图（门口、房间、穿门的 A*）和场景导出。每次推送 CI 都会跑一遍。
+走路/转弯换算、关键词解析、大脑的工具处理、公寓地图（门口、房间、穿门的 A*）、场景导出、两种传输层（对着假 robotd 和照真 Space 规则做的假 rendezvous：鉴权、先开事件流、限流、断线重连）和真机模式。每次推送 CI 都会跑一遍。
 
 ## 结构
 
@@ -275,8 +312,9 @@ DUCK_SIM_RL=../microduck_rl ../microduck_rl/.venv/bin/python -m pytest tests -q
 | `tracker.py` | 摄像头感知：手/脸的位置、大小、速度，摄像头开没开；手势 → 即时动作 |
 | `actions.py` | 鸭子的动作，以及按顺序执行它们的 `ActionQueue`；关键词模式和大模型共用 |
 | `commands.py` | 关键词模式：大模型不可用时的后备 |
-| `duck_client.py` | robotd 的 JSON-RPC 客户端（Unix socket `~/.cache/duck-sim/duck.sock`）。`move`/`head` 是持续意图，各走各的通道（转头不会顶掉走路），后台线程 10 Hz 重发、新目标立即发出；robotd 停收 500 ms 自动归零 |
-| `pose.py` | 启动时从和仿真同一份场景导出鸭子的网格（约 7.6 MB）、房子的静态几何和贴图（浏览器只下载一次）；运行时从 duck-body（TCP 7801）只读鸭子和会动物体的姿态，以约 45 Hz 推给浏览器 |
+| `duck_client.py` | 鸭子的身体：持续意图（`move`/`head`/`pose` 各走各的通道，转头不会顶掉走路）按传输层的节奏重发、新目标立即发出，robotd 停收 500 ms 自动归零；一直订阅着 robot.state（`state()` 直接取最新一帧）；走路时不进摆姿势模式 |
+| `transport.py` | 怎么连到 robotd：本机 Unix socket（10 Hz），或官方 rendezvous（HTTP + SSE，约 3 Hz，守着每分钟 1200 个请求的限额、断线自动重连） |
+| `pose.py` | 启动时从和仿真同一份场景导出鸭子的网格（约 7.6 MB）、房子的静态几何和贴图（浏览器只下载一次）；运行时从 duck-body（TCP 7801）只读鸭子和会动物体的姿态，以约 45 Hz 推给浏览器；真机模式下改用机器人自己报告的关节、IMU 和里程计 |
 | `server.py` | 标准库 HTTP 服务：页面、`/api/scene`、`/api/meshes.bin`、`/api/pose`（二进制姿态流）、`/api/say`（NDJSON 事件流）、`/api/status` |
 | `static/index.html` | 鸭子屏幕页面：three.js 渲染 + 聊天面板（流式显示回话） |
 | `bench.py` | 大模型测速与工具调用准确率 |

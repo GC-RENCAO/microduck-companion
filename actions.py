@@ -1,12 +1,12 @@
-"""鸭子会做的动作，以及按顺序执行它们的队列。关键词模式和大模型工具调用共用这一层。
+"""What the duck can do, and the queue that runs it in order. Shared by keyword mode and the LLM's tool calls.
 
-速度和时长都是在仿真里实测出来的（alpha 策略）：
-- vx 0.15 原地踏步；vx 0.3 稳定前进，稳态约 0.12 m/s；vx 0.5 会明显跑偏。
-- 步态是小碎步：约 4.6 步/秒，每步约 2.6 cm（vx 0.3 稳态，膝关节峰值计数）。
-- 原地转（vx=0）方向不稳定；边走边转（vx 0.3, vyaw ±1.0）可靠，但左右不对称：
-  含停下后的惯性，左转约 39°/s，右转约 50°/s。
-- 后退（vx<0）和侧移（vy）都走不动。
-- kick_right 在仿真里几乎不动腿（策略本身如此，robotd 有执行）；kick_left 动作明显。
+Speeds and durations were measured in the sim (alpha policies):
+- vx 0.15 steps in place; vx 0.3 walks steadily at about 0.12 m/s; vx 0.5 veers off.
+- The gait is small quick steps: about 4.6 steps/s of about 2.6 cm (vx 0.3 steady state, counted at knee peaks).
+- Turning in place (vx = 0) is unreliable; turning while walking (vx 0.3, vyaw ±1.0) is reliable but
+  asymmetric: including the coast after stopping, about 39°/s left and 50°/s right.
+- Backwards (vx < 0) and sideways (vy) do not walk.
+- kick_right barely moves the leg in the sim (the policy's own doing; robotd runs it); kick_left is clear.
 """
 
 from __future__ import annotations
@@ -24,12 +24,12 @@ TURN_VYAW = 1.0
 TURN_DEG_PER_S = {"left": 39.0, "right": 50.0}
 DEFAULT_TURN_DEG = 90.0
 DEFAULT_WALK_S = 3.0
-MIN_WALK_S = 1.0  # 再短的话步态还没起来，几乎不动
+MIN_WALK_S = 1.0  # any shorter and the gait has not started: it barely moves
 MAX_WALK_S = 20.0
 WALK_SPEED_MPS = 0.12
 STEPS_PER_S = 4.6
 
-# 躯干坐标系（米）：x 前，y 左，z 上；地面在 z≈-0.12。
+# Trunk frame (m): x forward, y left, z up; the floor is at z ≈ -0.12.
 LOOK_TARGETS = {
     "left": (0.3, 0.5, 0.1),
     "right": (0.3, -0.5, 0.1),
@@ -41,25 +41,25 @@ LOOK_TARGETS = {
 TRICKS = ("roulade", "kick_left", "kick_right", "ground_pick")
 SOUNDS = ("greet", "chirp", "coo", "inquire", "alarm")
 
-# 一个动作做完要多久（秒），队列据此等待再做下一个。技能和坐/站来自仿真观察。
+# How long an action takes (s); the queue waits this long before the next. Skills and sit/stand observed in the sim.
 TRICK_S = {"roulade": 3.0, "kick_left": 1.5, "kick_right": 1.5, "ground_pick": 6.0}
 SIT_STAND_S = 4.5
 LOOK_S = 1.5
 SOUND_S = 0.5
-SETTLE_S = 0.6  # 走路/转弯停下后的惯性
+SETTLE_S = 0.6  # the coast after walking/turning stops
 
 
 @dataclass
 class Step:
     name: str
     args: dict
-    source: str = "user"  # "user" = 主人的指令（聊天/手势）；"life" = 鸭子自己想做的（会被主人的指令打断）
+    source: str = "user"  # "user" = your command (chat/gesture); "life" = the duck's own idea (your commands interrupt it)
 
 
 def plan_walk(seconds=None, steps=None, meters=None) -> tuple[float, str]:
-    """把“几步 / 几米 / 几秒”换算成实际要走的秒数（截断到能走的范围），并给出如实的描述。
+    """Steps / metres / seconds → the seconds to actually walk (clamped to what is walkable), with an honest description.
 
-    单位换算在这里做，不交给大模型：小模型做算术不可靠（曾把“5 步”算成 50 秒）。
+    The conversion lives here, not in the LLM: small models are unreliable at arithmetic (“5 steps” once became 50 s).
     """
     if steps is not None:
         wanted, asked = float(steps) / STEPS_PER_S, f"{float(steps):g} 步"
@@ -79,47 +79,48 @@ def plan_walk(seconds=None, steps=None, meters=None) -> tuple[float, str]:
 
 
 def plan_turn(direction="left", degrees=DEFAULT_TURN_DEG) -> tuple[str, float, float, str]:
-    """转弯：方向、角度（截断到 10–720°）、要走的秒数、如实的描述。"""
+    """A turn: side, angle (clamped to 10–720°), seconds to walk, an honest description."""
     side = "right" if str(direction).lower().startswith(("r", "右")) else "left"
     degrees = max(10.0, min(float(degrees), 720.0))
     seconds = min(degrees / TURN_DEG_PER_S[side], MAX_WALK_S)
     return side, degrees, seconds, f"边走边{'左' if side == 'left' else '右'}转约 {degrees:g}°"
 
 
-COME_STOP_M = 0.6  # 走到离你这么近就停
-STEER_GAIN = 1.8  # 朝向误差（弧度）→ 转向速度
+COME_STOP_M = 0.6  # stop this close to you
+STEER_GAIN = 1.8  # heading error (rad) → turn rate
 
-# 沿路线走（navmap.py 规划），目标是“不撞墙、不迷路”：
-LOOKAHEAD_M = 0.25  # 盯着路线上前方这么远的点走：太远拐弯会切内角蹭到门框（0.3 时实测离障碍只剩 0.11 米）
-ARRIVE_M = 0.25  # 溜达到一个点：离它这么近算到了
-PLACE_ARRIVE_M = 0.45  # 去某个地点（窝、沙发……）：这么近就算到了；地点常在角落，转弯半径进不去，硬挤容易撞
-OFF_PATH_M = 0.3  # 偏离路线这么远就重新规划
+# Following a route (planned by navmap.py), so the duck neither bumps into walls nor gets lost:
+LOOKAHEAD_M = 0.25  # steer at the point this far ahead on the route: further cuts corners into door frames (0.3 left 0.11 m clearance)
+ARRIVE_M = 0.25  # wandering to a spot: this close counts as there
+PLACE_ARRIVE_M = 0.45  # going to a place (dock, sofa…): this close counts; places sit in corners the turning circle cannot reach, and squeezing in bumps
+OFF_PATH_M = 0.3  # replan when this far off the route
 REPLAN_EVERY_S = 4.0
-STUCK_WINDOW_S = 3.0  # 这么久几乎没前进（< STUCK_MOVE_M）算卡住
+STUCK_WINDOW_S = 3.0  # barely any progress (< STUCK_MOVE_M) for this long = stuck
 STUCK_MOVE_M = 0.06
-MAX_STUCK = 3  # 连续卡住几次就放弃，告诉主人过不去
-MAX_FALLS = 3  # 路上摔倒：当场爬起来、重新规划；摔这么多次就放弃
-NAV_SPEED_MPS = 0.12  # 实测行走速度，用来估算超时
-VIEWER_REACH_M = 3.0  # 叫它过来时，主人在墙外/房子外面：在这么远内找离主人最近的能走的点
+MAX_STUCK = 3  # give up after this many stucks in a row and say it cannot get through
+MAX_FALLS = 3  # falls on the way: get up and replan on the spot; give up after this many
+NAV_SPEED_MPS = 0.12  # measured walking speed, for the timeout
+VIEWER_REACH_M = 3.0  # called while you stand outside the walls/house: the nearest walkable spot within this distance
 
-# 原地转身（踏步 + 转向）。仿真实测（每组之间先站稳 3 秒，各测 3 次）：
-#   右转 vx 0.15, vyaw -1.2：-178° / -180° / -176°，身体只漂 0.15 米 —— 可靠
-#   左转 vx 0.15, vyaw +1.2：162° / 15° / 155° —— 有时几乎不转
-# 所以闭环：盯着朝向转，左转 1.5 秒没动静就改成往右绕大圈。
+# Pivoting (stepping in place while turning). Measured in the sim (3 s standing between runs, 3 runs each):
+#   right vx 0.15, vyaw -1.2: -178° / -180° / -176°, drifting only 0.15 m — reliable
+#   left  vx 0.15, vyaw +1.2:  162° /  15° /  155° — sometimes barely turns
+# So it is closed-loop: turn while watching the heading, and if a left turn stalls for 1.5 s go the long way right.
 PIVOT_VX = 0.15
 PIVOT_VYAW = 1.2
 PIVOT_DONE_DEG = 15.0
 PIVOT_STALL_S = 1.5
 PIVOT_STALL_DEG = 8.0
 PIVOT_TIMEOUT_S = 9.0
-PIVOT_BEFORE_WALK_DEG = 70.0  # 要去的方向偏这么多，先原地转过去再走（窄地方边走边转会顶到家具）
+PIVOT_BEFORE_WALK_DEG = 70.0  # pivot first when the way to go is this far off (turning while walking pushes into furniture in tight spots)
 
 
 class Actions:
-    """单个动作：立即发出意图，返回 (结果说明, 需要等待的秒数)。说明会作为工具结果交给大模型。
+    """One action each: send the intent at once, return (what happened, seconds to wait). The text goes back to the LLM as the tool result.
 
-    come_here / go_to / face_me 是闭环动作：需要知道鸭子和“你”在哪、房子的地图（world，由 life.py 提供），
-    在执行它的线程里以 10 Hz 边看边修正，直到做到、放弃，或被 stop 打断（should_stop 由 ActionQueue 注入）。
+    come_here / go_to / face_me are closed-loop: they need where the duck and “you” are and the house map
+    (`world`, provided by life.py), and correct course at 10 Hz on the thread running them until done,
+    given up, or interrupted by stop (`should_stop` is injected by ActionQueue).
     """
 
     def __init__(self, duck: DuckClient):
@@ -128,17 +129,17 @@ class Actions:
         self.should_stop = lambda: False
 
     def come_here(self) -> tuple[str, float]:
-        """走到主人面前：有地图就找路绕过墙、穿过门；没墙的空地就直接走过去。"""
+        """Walk up to you: with a map, around walls and through doors; on an open floor, straight there."""
         if self.world is None or self.world.where_is_viewer() is None:
             return "不知道主人在哪", 0.0
         if self.world.where_is_viewer()[1] < COME_STOP_M:
             return "已经在主人面前了", 0.0
-        # 主人（相机）常常站在墙外、房子外面：那就走到离主人最近的能走的地方
+        # You (the camera) often stand outside the walls or the house: go to the walkable spot nearest you
         return self._navigate(self.world.viewer_xy, stop_within_m=COME_STOP_M, label="走到主人面前",
                               goal_reach_m=VIEWER_REACH_M)
 
     def go_to(self, place: str) -> tuple[str, float]:
-        """去房子里的某个地方（房间或家具旁边，名字见 navmap 的 places）。"""
+        """Go somewhere in the house (a room or beside furniture; names from navmap's places)."""
         nav = self.world.nav if self.world is not None else None
         if nav is None:
             return "这里没有房子的地图，不知道那是哪", 0.0
@@ -148,11 +149,11 @@ class Actions:
         return self._navigate(lambda: (spot.x, spot.y), stop_within_m=PLACE_ARRIVE_M, label=f"去{place}")
 
     def wander_to(self, x: float, y: float) -> tuple[str, float]:
-        """自己溜达到某个点（life.py 用，不给大模型）。"""
+        """Wander to a spot on its own (for life.py, not offered to the LLM)."""
         return self._navigate(lambda: (x, y), stop_within_m=ARRIVE_M, label="溜达")
 
     def face_me(self) -> tuple[str, float]:
-        """原地转过来面朝主人（不用先走开再绕回来，离得很近也行）。"""
+        """Pivot to face you (no walking away and circling back, so it works up close)."""
         if self.world is None or self.world.where_is_viewer() is None:
             return "不知道主人在哪", 0.0
         def heading():
@@ -164,7 +165,7 @@ class Actions:
         return "转身：被打断" if self.should_stop() else "转身：没转过来", SETTLE_S
 
     def _pivot_to(self, heading_fn, timeout_s: float = PIVOT_TIMEOUT_S) -> bool:
-        """原地转到 heading_fn() 的朝向（弧度）。左转转不动就改往右绕。转到了返回 True。"""
+        """Pivot to heading_fn() (rad). If turning left stalls, go round to the right. True once there."""
         started = time.monotonic()
         prefer_right = False
         stall_at, stall_yaw = started, self.world.duck_pose()[2]
@@ -183,7 +184,7 @@ class Actions:
             if now - stall_at > PIVOT_STALL_S:
                 turned = abs(math.atan2(math.sin(yaw - stall_yaw), math.cos(yaw - stall_yaw)))
                 if left and turned < math.radians(PIVOT_STALL_DEG):
-                    prefer_right = True  # 左转转不动：改往右绕一大圈
+                    prefer_right = True  # the left turn stalls: go the long way round to the right
                 stall_at, stall_yaw = now, yaw
             self.duck.move(PIVOT_VX, PIVOT_VYAW if left else -PIVOT_VYAW, 0.4)
             time.sleep(0.1)
@@ -191,9 +192,10 @@ class Actions:
         return False
 
     def _navigate(self, goal_fn, stop_within_m: float, label: str, goal_reach_m: float = 1.0) -> tuple[str, float]:
-        """沿规划好的路线走到 goal_fn() 附近。goal_fn 每次调用都重新取目标（主人可能在走动）。
+        """Follow a planned route to near goal_fn(), which is asked afresh each time (you may be moving).
 
-        没地图（开阔空地）就直接朝目标走。0.4 秒自动失效的 move 意图保证线程卡住也不会一直走。
+        Without a map (an open floor) it heads straight for the goal. Move intents expire on their own
+        (robotd drops them 500 ms after the last), so a stuck thread never keeps the duck walking.
         """
         world, nav = self.world, self.world.nav
         started, path, planned_at = time.monotonic(), None, 0.0
@@ -210,12 +212,12 @@ class Actions:
                 if math.dist((x, y), goal) < stop_within_m:
                     self.duck.stop()
                     return f"{label}：到了", SETTLE_S
-                # 目标在墙外：走到路线终点（离目标最近的能走的点）也算到了
+                # The goal is beyond a wall: the end of the route (the nearest walkable spot) counts as arrived
                 if path and math.dist((x, y), path[-1]) < ARRIVE_M and math.dist(path[-1], goal) > stop_within_m:
                     self.duck.stop()
                     return f"{label}：走到离目标最近的地方了（中间有墙）", SETTLE_S
 
-                # 摔倒了：当场爬起来（不能等 life.py——它的“站起来”会排在这个动作后面），再重新规划
+                # Fallen: get up right here (not via life.py — its stand_up would queue behind this action), then replan
                 if now - state_at > 0.5:
                     state_at = now
                     state = self.duck.state()
@@ -228,7 +230,7 @@ class Actions:
                         path, progress_at, progress_pos = None, time.monotonic(), world.duck_pose()[:2]
                         continue
 
-                # 规划 / 重新规划：没路线、偏离路线、隔一段时间（主人可能走动了）
+                # Plan / replan: no route, off the route, or every so often (you may have moved)
                 if nav is not None and (path is None or now - planned_at > REPLAN_EVERY_S
                                         or _distance_to_path((x, y), path) > OFF_PATH_M):
                     path, planned_at = nav.plan((x, y), goal, goal_reach_m), now
@@ -241,7 +243,7 @@ class Actions:
                         self.duck.stop()
                         return f"{label}：走了太久还没到，先停下", SETTLE_S
 
-                # 卡住了：几乎没前进 → 朝空的方向转一下，再从当前位置重新规划
+                # Stuck: barely any progress → turn towards open space, then replan from here
                 if now - progress_at > STUCK_WINDOW_S:
                     if math.dist((x, y), progress_pos) < STUCK_MOVE_M:
                         stuck += 1
@@ -259,7 +261,7 @@ class Actions:
                 bearing = math.atan2(target[1] - y, target[0] - x) - yaw
                 bearing = math.atan2(math.sin(bearing), math.cos(bearing))
                 if abs(bearing) > math.radians(PIVOT_BEFORE_WALK_DEG):
-                    # 要去的方向偏太多：先原地转过去（窄地方边走边转会顶到家具），再接着走
+                    # The way to go is too far off: pivot first (turning while walking pushes into furniture), then carry on
                     self._pivot_to(lambda: math.atan2(target[1] - world.duck_pose()[1], target[0] - world.duck_pose()[0]))
                     progress_at, progress_pos = time.monotonic(), world.duck_pose()[:2]
                     continue
@@ -269,7 +271,7 @@ class Actions:
             world.show_path(None)
 
     def _unstick(self, x: float, y: float, yaw: float) -> None:
-        """卡住时（不会后退）：原地转向最空的方向，再往那边走半秒挪开。"""
+        """When stuck (it cannot back up): pivot towards the most open direction and walk half a second that way."""
         nav = self.world.nav
         if nav is None:
             best = yaw + math.pi / 2
@@ -309,10 +311,10 @@ class Actions:
         return "已经站着了", 0.0
 
     def _get_up_from_fall(self, state: dict) -> tuple[str, float]:
-        """摔倒了：先收进坐姿，再从坐姿起身（仿真实测：躯干 0.063 → 0.121 米）。
+        """Fallen: tuck into sitting first, then rise from sitting (in the sim: trunk 0.063 → 0.121 m).
 
-        robot.enable 对倒地的鸭子没用（实测躺着不动）；robotd 里“站起来”分两种：站着的用 init，
-        坐着的用 sit_toggle，从地上爬起来走的是后者（vetbook 把它记作一次 rise）。
+        robot.enable does nothing for a duck on the ground (it just lies there). robotd has two ways up: init
+        from standing, sit_toggle from sitting — getting up off the floor is the latter (vetbook counts it as a rise).
         """
         if state.get("policy") != "sit":
             self.duck.do("sit_toggle")
@@ -341,7 +343,7 @@ class Actions:
     def look(self, direction: str = "front") -> tuple[str, float]:
         target = direction if direction in LOOK_TARGETS else "front"
         if self.world is not None:
-            self.world.hold_off_head(3.0)  # 主人让看哪就看哪，这 3 秒别被“盯着主人”抢回去
+            self.world.hold_off_head(3.0)  # look where you asked; for these 3 s “watch you” must not take the head back
         self.duck.look(*LOOK_TARGETS[target])
         return f"看向 {target}", LOOK_S
 
@@ -374,19 +376,19 @@ class Actions:
 
 
 class ActionQueue:
-    """按顺序执行动作：每个做完（等它的时长）再做下一个。stop 清空队列并立即停下。"""
+    """Runs actions in order, each for its duration before the next. stop empties the queue and halts at once."""
 
     def __init__(self, actions: Actions):
         self.actions = actions
         self._steps: queue.Queue[Step] = queue.Queue()
-        self._generation = 0  # stop 时递增，正在等待的动作据此提前结束
+        self._generation = 0  # bumped by stop, so a waiting action ends early
         self.current: str | None = None
         self.current_source: str | None = None
         self.log: list[str] = []
         threading.Thread(target=self._worker, name="duck-actions", daemon=True).start()
 
     def submit(self, steps: list[Step]) -> None:
-        # 主人的指令打断鸭子自己的行为（溜达、凑过来…），不排在它们后面干等
+        # Your command interrupts the duck's own behaviour (wandering, coming over…) instead of queueing behind it
         if any(s.source == "user" for s in steps) and self.current_source == "life":
             self.cancel()
         for step in steps:
@@ -444,7 +446,7 @@ def _distance_to_path(p, path) -> float:
 
 
 def _lookahead(p, path, ahead_m: float) -> tuple[float, float]:
-    """路线上离 p 最近的点再往前 ahead_m 的点（到终点为止）。"""
+    """The point ahead_m further along the route than the point nearest p (up to the end)."""
     if len(path) < 2:
         return path[-1]
     best = min(range(len(path) - 1), key=lambda i: _closest_on_segment(p, path[i], path[i + 1])[0])

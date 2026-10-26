@@ -60,13 +60,49 @@ server.py ─ brain.py   local LLM (Ollama): plan actions → talk, streamed
           ─ tracker.py hand/face perception, gestures
           ─ actions.py action queue, path following, fall recovery
           ─ navmap.py  map, rooms, places, A* — generated from the scene
-          ─ pose.py    mirrors the simulated body to the browser
-   │ unix socket (JSON-RPC intents)          │ TCP, read-only
+          ─ pose.py    mirrors the body to the browser (sim ground truth, or the robot's own robot.state)
+          ─ transport.py  unix socket, or the official rendezvous over HTTP
+   │ JSON-RPC intents                         │ TCP, read-only (sim only)
 robotd (official, unchanged)             duck-body (official MuJoCo simulator)
 ```
 
 It is a working take on what microduck's roadmap calls **M9 — the autonomous brain**, and on the architecture proposed in
 [microduck#454](https://github.com/pollen-robotics/microduck/issues/454).
+
+## A real duck, from anywhere
+
+A duck you own is reached the way the official remote access works
+([remote-access-design §3.8](https://github.com/pollen-robotics/microduck/blob/main/docs/design/remote-access-design.md)):
+the robot signs in to a Hugging Face account and registers with the rendezvous Space; duck-chat signs in to the same
+account and sends its JSON-RPC inside `peer` envelopes that the Space relays to the robot's `mediad`. Plain HTTP and
+server-sent events — no WebRTC, no port forwarding, the same lane the official Spaces use.
+
+```bash
+robotctl account login          # on the duck, once (in the simulator: scripts/duck-sim ctl account login)
+hf auth login                   # on your Mac, the same Hugging Face account (or set HF_TOKEN)
+DUCK_TRANSPORT=rendezvous ./run.sh             # DUCK_ROBOT=<name> if the account has several ducks
+```
+
+With a real robot duck-chat switches to **real-robot mode** (`DUCK_WORLD=robot`):
+
+- the 3D duck is drawn from what the robot reports — measured joints, IMU orientation, contact odometry — on a plain
+  floor, because there is no house and no ground truth;
+- the duck never walks on its own: it may be standing on a table and nothing here can see the edge. Chat, gestures,
+  sounds, tricks, head tracking and body language all work; it walks only when you tell it to (`DUCK_ROAM=1` lifts this);
+- “come here” and “look at me” are off, because the 3D camera is not a place in the robot's world.
+
+The rendezvous allows 1200 requests a minute per token, and a 429 cuts off everything that token does. Over it,
+continuous intents go at ~3 Hz instead of 10 and robot.state is read at 3 Hz; measured through a local stand-in, that is
+~200 requests a minute idle and ~620 while walking and talking, with a hard client-side stop at 1000.
+
+**Verified so far:** end to end through `tests/fake_rendezvous.py`, a local stand-in for the Space and the robot's relay
+that forwards to the simulator. Walks and turns over it match the local socket (left 89°/106°, right −112°/−112° for a
+90° command). **Not yet verified** against the real Space or a physical duck. To try the same path without an account:
+
+```bash
+python tests/fake_rendezvous.py &              # relays to the simulator's socket
+DUCK_TRANSPORT=rendezvous REACHY_CENTRAL_URL=http://127.0.0.1:8790 HF_TOKEN=local ./start.sh
+```
 
 ## Measured in simulation
 
@@ -81,12 +117,12 @@ It is a working take on what microduck's roadmap calls **M9 — the autonomous b
 
 ## Status
 
-- **Simulation only so far.** It talks to `robotd` over the local unix socket, which is what `scripts/duck-sim` exposes.
-  A real duck on your LAN needs a transport over the official remote path (WebRTC / rendezvous) — the next milestone.
-- In simulation the duck knows exactly where it is; a real robot will need localisation (odometry + the visual SLAM the
-  apartment scene is designed for).
+- **Tested in simulation; the remote path is built but not yet run against the real Space or a physical duck**
+  (see [A real duck, from anywhere](#a-real-duck-from-anywhere)).
+- In simulation the duck knows exactly where it is; a real robot only has odometry from where it booted, so the house
+  and navigation features stay in the simulator until there is localisation (the visual SLAM the apartment is designed for).
 - The LLM prompts, UI labels and the detailed notes ([README.zh-CN.md](README.zh-CN.md)) are in Chinese; the duck
-  answers in whatever language you use. Code comments are being moved to English.
+  answers in whatever language you use. Code comments are in English.
 
 ## Development
 
@@ -97,7 +133,9 @@ DUCK_SIM_RL=../microduck_rl ../microduck_rl/.venv/bin/python -m pytest tests -q
 
 They run offline in a few seconds — no simulator, no daemons, no Ollama (the LLM is a fake local server) — and cover
 gesture recognition near misses (petting vs. “stop”, waving vs. beckoning), walk/turn conversion, the keyword parser,
-the brain's tool handling, the apartment map (doorways, rooms, A* through doors) and the scene export.
+the brain's tool handling, the apartment map (doorways, rooms, A* through doors), the scene export, both transports
+(against a fake `robotd` and a fake rendezvous that copies the real one's rules: auth, stream-first, rate limits,
+reconnects) and real-robot mode.
 CI runs the same suite on every push (`.github/workflows/tests.yml`).
 
 ### Calibrating gestures to your camera

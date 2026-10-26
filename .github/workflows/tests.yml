@@ -16,7 +16,7 @@ jobs:
 
       # Only what duck-chat imports — not microduck_rl's training stack (torch, mjlab, warp…).
       - name: Install dependencies
-        run: pip install mujoco numpy scipy pillow pytest
+        run: pip install mujoco numpy scipy pillow requests pytest
 
       # The scenes and meshes the integration tests load (the apartment, the duck's MJCF + STLs).
       - name: Fetch the official scenes

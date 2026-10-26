@@ -189,11 +189,19 @@ document.getElementById("form").addEventListener("submit", (e) => {
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.isComposing || e.keyCode === 229)) e.preventDefault(); });
 
 const chips = document.getElementById("chips");
-for (const q of ["过来", "看着我", "去厨房", "去沙发", "回窝", "停", "前进", "坐下", "站起来", "翻滚", "你好", "帮助"]) {
-  const b = document.createElement("button");
-  b.className = "chip"; b.type = "button"; b.textContent = q;
-  b.onclick = () => { send(q); input.focus(); };
-  chips.appendChild(b);
+// Some chips need the duck to know where you are (the sim) or a house to go places in (a map)
+const CHIPS = [["过来", "viewer"], ["看着我", "viewer"], ["去厨房", "厨房"], ["去沙发", "沙发"], ["回窝", "窝（充电座）"],
+               ["停"], ["前进"], ["坐下"], ["站起来"], ["翻滚"], ["你好"], ["帮助"]];
+function showChips(layout) {
+  chips.replaceChildren();
+  for (const [q, needs] of CHIPS) {
+    if (needs === "viewer" && layout.world !== "sim") continue;
+    if (needs && needs !== "viewer" && !(layout.places || []).includes(needs)) continue;
+    const b = document.createElement("button");
+    b.className = "chip"; b.type = "button"; b.textContent = q;
+    b.onclick = () => { send(q); input.focus(); };
+    chips.appendChild(b);
+  }
 }
 
 // ── Status ────────────────────────────────────────────────────────────────
@@ -296,6 +304,7 @@ async function loadDuck() {
     fetch("/api/scene").then((r) => r.json()),
     fetch("/api/meshes.bin").then((r) => r.arrayBuffer()),
   ]);
+  showChips(layout);
   const geometries = {};
   for (const [id, m] of Object.entries(layout.meshes)) {
     const geometry = new THREE.BufferGeometry();

@@ -4,10 +4,14 @@
   · the duck's parts (meshes) and the loose things in the room (balls, boxes) — posed every frame;
   · the walls, floors and furniture that never move — sent once with their poses;
   · the textures they use (MuJoCo's raw pixels → PNG).
-- At runtime, poses are read (read-only) from duck-body (TCP 7801): `read` gives the duck's joints and
-  trunk, `objects` the loose things (`objects` is an op added to microduck_rl by this project's patch;
-  without it the loose things stay where they started). One mj_kinematics pass, then every part's
-  position and rotation go to the browser at about 50 Hz.
+- At runtime the duck's pose comes from one of two places (`world`):
+  · `sim`: read-only from duck-body (TCP 7801) — `read` gives the joints and the true trunk pose,
+    `objects` the loose things (`objects` is an op added to microduck_rl by this project's patch; without
+    it they stay where they started). About 50 Hz.
+  · `robot`: from the robot's own robot.state — measured joints, the IMU's orientation and contact
+    odometry's position. This is all a real duck can say about itself: no house, no ground truth, and a
+    world frame that is wherever it was when it booted. 10 Hz locally, ~3 Hz through the rendezvous.
+  Either way one mj_kinematics pass gives every part's position and rotation for the browser.
 """
 
 from __future__ import annotations
@@ -40,9 +44,10 @@ GEOM_TYPES = {int(kind): name for kind, name in (
     (mujoco.mjtGeom.mjGEOM_MESH, "mesh"))}
 
 
-def scene_path() -> Path:
-    """Like scripts/duck-sim: empty = the default scene; contains a slash = a path; otherwise microduck_rl's scene_<name>.xml."""
-    name = os.environ.get("DUCK_SIM_SCENE", "")
+def scene_path(world: str = "sim") -> Path:
+    """Like scripts/duck-sim: empty = the default scene; contains a slash = a path; otherwise microduck_rl's scene_<name>.xml.
+    A real robot lives in no scene of ours: it gets the default floor whatever DUCK_SIM_SCENE says."""
+    name = os.environ.get("DUCK_SIM_SCENE", "") if world == "sim" else ""
     if not name:
         return DEFAULT_SCENE
     if "/" in name:
@@ -51,8 +56,11 @@ def scene_path() -> Path:
 
 
 class PoseSource:
-    def __init__(self) -> None:
-        self.scene_file = scene_path()
+    def __init__(self, world: str = "sim", duck=None) -> None:
+        if world not in ("sim", "robot"):
+            raise ValueError(f"DUCK_WORLD is sim or robot, not {world!r}")
+        self.world = world
+        self.scene_file = scene_path(world)
         model = mujoco.MjModel.from_xml_path(str(self.scene_file))
         self.model = model
         self.data = mujoco.MjData(model)
@@ -94,7 +102,8 @@ class PoseSource:
             if joint >= 0:
                 self._joints.append((wire_index, model.jnt_qposadr[joint]))
 
-        self.connected = False
+        self._connected = False
+        self._robot_at = 0.0
         self.objects_live = False  # whether duck-body serves the loose things' poses
         # The duck's world position (m) and heading (rad, 0 = +x, counter-clockwise positive), for the “knows where you are” behaviours
         self.duck_xy = (0.0, 0.0)
@@ -102,7 +111,16 @@ class PoseSource:
         self.frame: bytes | None = None  # the latest packed poses
         self.frame_id = 0
         self._cond = threading.Condition()
-        threading.Thread(target=self._run, name="pose", daemon=True).start()
+        if world == "sim":
+            threading.Thread(target=self._run, name="pose", daemon=True).start()
+        else:
+            duck.on_state(self._on_robot_state)
+
+    @property
+    def connected(self) -> bool:
+        if self.world == "robot":
+            return time.monotonic() - self._robot_at < 2.0
+        return self._connected
 
     # ── One-off export ──────────────────────────────────────────────────────────
 
@@ -175,8 +193,7 @@ class PoseSource:
             return self.frame_id, self.frame
 
     def _run(self) -> None:
-        model, data = self.model, self.data
-        parts = np.array(self.parts)
+        data = self.data
         body = None
         ask_objects = bool(self._loose)
         while True:
@@ -203,27 +220,47 @@ class PoseSource:
                                 data.qpos[adr : adr + 7] = qpos
                     else:  # no such op (microduck_rl without the patch): loose things stay where they started
                         ask_objects = False
-                self.connected = True
+                self._connected = True
                 w, x, y, z = sensors["imu"]["quat"]
                 self.duck_xy = (sensors["trunk"][0], sensors["trunk"][1])
                 self.duck_yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
             except (OSError, ValueError, KeyError):
                 body = None
-                self.connected = False
+                self._connected = False
                 ask_objects = bool(self._loose)
                 time.sleep(1.0)  # the sim is down or restarting: retry shortly
                 continue
 
-            mujoco.mj_kinematics(model, data)
-            # 12 floats per part: position 3 + row-major rotation 9, after the sim time the browser interpolates with.
-            poses = np.concatenate([data.geom_xpos[parts], data.geom_xmat[parts]], axis=1)
-            packed = struct.pack("<d", float(sensors["sim_time"])) + poses.astype("<f4").tobytes()
-            with self._cond:
-                self.frame = packed
-                self.frame_id += 1
-                self._cond.notify_all()
-
+            self._publish(float(sensors["sim_time"]))
             time.sleep(max(0.0, 1.0 / POSE_HZ - (time.perf_counter() - started)))
+
+    def _on_robot_state(self, state: dict) -> None:
+        """A robot.state frame → the same qpos the sim branch fills, from what the robot measured."""
+        try:
+            odom, quat, joints = state["odom"], state["imu"]["quat"], state["joints"]
+            with self._cond:  # frames arrive on the subscription thread; kinematics shares `data`
+                data = self.data
+                data.qpos[self._trunk : self._trunk + 3] = odom["position"]
+                data.qpos[self._trunk + 3 : self._trunk + 7] = quat
+                for wire_index, adr in self._joints:
+                    data.qpos[adr] = joints[wire_index]
+        except (KeyError, IndexError, TypeError):
+            return  # a robotd predating odometry/IMU in robot.state: nothing to draw from
+        self.duck_xy = (odom["position"][0], odom["position"][1])
+        self.duck_yaw = float(odom["yaw"])
+        self._robot_at = time.monotonic()
+        self._publish(float(state.get("t", 0.0)))
+
+    def _publish(self, t: float) -> None:
+        mujoco.mj_kinematics(self.model, self.data)
+        parts = np.array(self.parts)
+        # 12 floats per part: position 3 + row-major rotation 9, after the time the browser interpolates with.
+        poses = np.concatenate([self.data.geom_xpos[parts], self.data.geom_xmat[parts]], axis=1)
+        packed = struct.pack("<d", t) + poses.astype("<f4").tobytes()
+        with self._cond:
+            self.frame = packed
+            self.frame_id += 1
+            self._cond.notify_all()
 
     @staticmethod
     def _connect():

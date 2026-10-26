@@ -1,16 +1,24 @@
-"""鸭子的“生命”：知道你在哪、有心情、会自己找事做。每秒 10 次，不经过大模型。
+"""The duck's “life”: it knows where you are, has moods, and finds things to do. 10 times a second, no LLM.
 
-你在 3D 世界里的位置 = 浏览器 3D 视角（相机）的位置：你从哪个角度看它，它就知道你在那个方向。
-综合三样东西决定鸭子此刻的样子：
-- 你在哪（/api/viewer）→ 它盯着你看；你绕到背后，它会转过身来。
-- 摄像头看到什么（tracker.py）→ 盯着你的手/脸；你离开会找你，回来会高兴；被摸、被吓到、你凑近都有反应。
-- 它的心情（开心、精力）和多久没人理 → 陪着你时偶尔撒娇；没人理就自己溜达，久了坐下打盹。
+Where you are in the 3D world = where the browser's 3D view (camera) is: whichever side you look from,
+it knows you are there. Three things decide what the duck is doing at any moment:
+- Where you are (/api/viewer) → it watches you; walk round behind it and it turns to face you.
+- What the camera sees (tracker.py) → it watches your hand/face; it looks for you when you leave and is
+  glad when you are back; it reacts to petting, to being startled, and to you leaning in.
+- Its mood (happiness, energy) and how long it has been ignored → it nuzzles up while you are around;
+  ignored, it wanders off on its own and eventually sits down for a nap.
 
-谁说了算（从高到低）：主人的指令（聊天/手势，会打断自主行为）> 摔倒爬起 > 对你的反应 > 自己找事做。
-头：主人明确让它看某处时、做技能时，不去管头；其余时间盯着你，说话时轻轻点头，疑问时歪头。
+Who wins (highest first): your commands (chat/gestures, which interrupt its own behaviour) > getting up
+after a fall > reacting to you > its own ideas.
+The head: left alone while you have told it where to look or during a skill; otherwise it watches you,
+nods gently while talking, and tilts when asking.
 
-仿真实测的身体限制决定了这里的写法：不能原地转（只能边走边转）、下蹲几乎看不出（用前倾/后仰/歪身表达）、
-模型里没有嘴巴关节（说话用点头表现）。
+The body's measured limits shaped this: pivoting is unreliable (so mostly turns while walking), crouching
+barely shows (leaning forward/back/sideways expresses instead), and the model has no mouth joint
+(talking is shown by nodding).
+
+With a real robot (`real`), the 3D camera is not a place in the robot's world, so where you are is
+unknown, and life starts nothing that walks (it may be on a table; DUCK_ROAM=1 allows it).
 """
 
 from __future__ import annotations
@@ -26,53 +34,60 @@ from duck_client import DuckError
 from tracker import Tracker
 
 TICK_S = 0.1
-LOOK_MIN_S = 1 / 15  # 头部目标最多每秒更新 15 次
-TRUNK_Z = 0.12  # 躯干原点离地高度（米）
+# Steps that move the duck across the floor. With a real robot life starts none of them on its own: it
+# may be on a table, and nothing here can see the edge (DUCK_ROAM=1 allows it anyway).
+LOCOMOTION = {"walk_forward", "turn", "come_here", "face_me", "go_to", "wander_to"}
+LOOK_MIN_S = 1 / 15  # the head target changes at most 15 times a second
+TRUNK_Z = 0.12  # trunk origin height above the floor (m)
 
-# 你多久没出现在摄像头里算离开、离开后多久开始找你
+# How long out of the camera counts as gone, and how often it then looks for you
 AWAY_AFTER_S = 8.0
 SEARCH_EVERY_S = 18.0
-# 和你相处：最近有互动或你在镜头前，就算“陪着你”
+# Being with you: a recent interaction, or you in front of the camera
 WITH_YOU_S = 30.0
-FACE_YOU_AFTER_S = 1.5  # 你在它侧后方（偏差 > 50°）持续这么久，它就转过来
+FACE_YOU_AFTER_S = 1.5  # you behind its shoulder (> 50° off) for this long, and it turns round
 FACE_YOU_DEG = 50.0
-# 现在能原地转身（actions._pivot_to），离得近也能转过来；太近（< 0.3 米）就只用头看
+# It can pivot now (actions._pivot_to), so it turns to you even up close; closer than 0.3 m it only turns its head
 FACE_YOU_MIN_M = 0.3
-# 没人理
+# Ignored
 BORED_AFTER_S = 45.0
 NAP_AFTER_S = 180.0
-WANDER_NEAR_M = (0.6, 1.8)  # 有地图时：在同一个房间里挑这么远的一个能走的点溜过去
-NEST = "窝（充电座）"  # 困了先回窝再打盹
+WANDER_NEAR_M = (0.6, 1.8)  # with a map: wander to a walkable spot this far away in the same room
+NEST = "窝（充电座）"  # sleepy: back to the dock before napping
 
-# 摄像头反应
-PET_SIZE = 0.33  # 手占画面宽度超过这个比例 = 很近
-PET_SPEED = (0.1, 1.5)  # 慢慢地动 = 在摸
+# Reactions to the camera
+PET_SIZE = 0.33  # a hand wider than this fraction of the frame = very close
+PET_SPEED = (0.1, 1.5)  # moving slowly = petting
 PET_AFTER_S = 0.8
-STARTLE_SPEED = 4.0  # 手飞快地挥过
-CURIOUS_GROWTH = 1.35  # 脸 1 秒内变大 35% = 凑近看它
+STARTLE_SPEED = 4.0  # a hand swiping past fast
+CURIOUS_GROWTH = 1.35  # the face 35% bigger within 1 s = leaning in to look
 
-TALK_BOB_HZ = 1.8  # 说话时点头的频率和幅度
+TALK_BOB_HZ = 1.8  # nodding rate and size while talking
 TALK_BOB_RAD = 0.12
 
 
 class Life:
-    def __init__(self, runner: ActionQueue, tracker: Tracker, pose, nav=None):
+    def __init__(self, runner: ActionQueue, tracker: Tracker, pose, nav=None, real: bool = False, roam: bool | None = None):
         self.runner, self.tracker, self.pose = runner, tracker, pose
-        self.nav = nav  # navmap.NavMap：房子的地图；开阔空地时为 None
-        self.path: list[tuple[float, float]] | None = None  # 正在走的路线（页面上画出来）
+        # A real robot: the 3D view's camera is not a place in its world (its odometry starts wherever it
+        # booted), so “where you are” is unknown rather than wrong, and it does not roam unless told to.
+        self.real = real
+        self.roam = (not real) if roam is None else roam
+        self.nav = nav  # navmap.NavMap: the house map; None on an open floor
+        self.path: list[tuple[float, float]] | None = None  # the route being walked (drawn in the page)
         self.duck = runner.actions.duck
         runner.actions.world = self
         tracker.on_event = self.on_event
 
         now = time.monotonic()
-        self.viewer: tuple[float, float, float] | None = None  # 你在 3D 世界里的位置（米）
+        self.viewer: tuple[float, float, float] | None = None  # where you are in the 3D world (m)
         self.happy, self.energy = 0.6, 0.8  # 0–1
         self.last_interaction = now
-        self.last_viewer_move = 0.0  # 你拖动/缩放视角 = 你在房间里走动，也算“你在身边”
+        self.last_viewer_move = 0.0  # dragging/zooming the view = you moving around the room, which also counts as being around
         self.with_you_since: float | None = None
         self.away_since: float | None = None
         self.napping = False
-        self.memory: deque[tuple[float, str]] = deque(maxlen=8)  # 最近发生的事，给大模型的“嘴巴”
+        self.memory: deque[tuple[float, str]] = deque(maxlen=8)  # recent events, for the LLM's “mouth”
 
         self._state: dict = {}
         self._state_at = 0.0
@@ -81,20 +96,20 @@ class Life:
         self._pet_since: float | None = None
         self._face_sizes: deque[tuple[float, float]] = deque(maxlen=20)
         self._next_idle = now + random.uniform(15, 30)
-        # 头和身体的表情
+        # Head and body expressions
         self._speaking = False
         self._tilt_until, self._tilt_dir = 0.0, 1.0
         self._pose_until, self._pose = 0.0, (0.0, 0.0)
-        # robotd 在姿态意图过期后会停在最后的姿态，而且留在“摆姿势”模式里不响应走路，
-        # 所以表情结束要先平滑摆正、再退出这个模式（duck.release_pose）。
-        # 启动时先退出一次，清掉上次运行留下的状态。
+        # After a pose intent expires robotd holds the last pose and stays in posing mode, deaf to walking,
+        # so an expression ends by gliding back level and then leaving the mode (duck.release_pose).
+        # Leave it once at startup too, clearing whatever a previous run left behind.
         self._glide_until: float | None = None
         self.duck.release_pose(force=True)
         self._head_hold_off_until = 0.0
         self._last_look = 0.0
         threading.Thread(target=self._run, name="life", daemon=True).start()
 
-    # ── 外部输入 ────────────────────────────────────────────────────────────
+    # ── Inputs ────────────────────────────────────────────────────────────
 
     def set_viewer(self, x: float, y: float, z: float) -> None:
         if self.viewer is None or math.dist(self.viewer, (x, y, z)) > 0.05:
@@ -102,7 +117,7 @@ class Life:
         self.viewer = (x, y, z)
 
     def _with_you(self, now: float, present: bool) -> bool:
-        """你在身边：摄像头看到你，或者最近和它互动过 / 动过视角。"""
+        """You are around: the camera sees you, or you recently interacted / moved the view."""
         return present or now - max(self.last_interaction, self.last_viewer_move) < WITH_YOU_S
 
     def duck_pose(self) -> tuple[float, float, float]:
@@ -115,21 +130,21 @@ class Life:
         self.path = path
 
     def where_is_viewer(self) -> tuple[float, float] | None:
-        """你相对鸭子的方位（弧度，正 = 在它左边）和距离（米）。"""
-        if self.viewer is None or not self.pose.connected:
+        """Your bearing from the duck (rad, positive = on its left) and distance (m); None when unknown."""
+        if self.real or self.viewer is None or not self.pose.connected:
             return None
         dx, dy = self.viewer[0] - self.pose.duck_xy[0], self.viewer[1] - self.pose.duck_xy[1]
         bearing = math.atan2(dy, dx) - self.pose.duck_yaw
         return math.atan2(math.sin(bearing), math.cos(bearing)), math.hypot(dx, dy)
 
     def on_chat(self, text: str) -> None:
-        """你说了句话：算互动；是疑问句就歪头；在打盹就醒过来。"""
+        """You said something: an interaction; a question tilts the head; a nap ends."""
         self._interact()
         if _is_question(text):
             self.tilt_head()
 
     def on_event(self, text: str, kind: str) -> None:
-        """手势等即时事件。"""
+        """Instant events such as gestures."""
         self._interact()
         self._remember(f"主人比了手势 {text}")
 
@@ -140,11 +155,11 @@ class Life:
         self._tilt_until, self._tilt_dir = time.monotonic() + seconds, random.choice((-1.0, 1.0))
 
     def hold_off_head(self, seconds: float) -> None:
-        """主人明确让它看某处：这段时间不去管头。"""
+        """You told it where to look: leave the head alone for this long."""
         self._head_hold_off_until = time.monotonic() + seconds
 
     def describe(self) -> list[str]:
-        """给大模型“嘴巴”的心情和最近发生的事。"""
+        """Mood and recent events for the LLM's “mouth”."""
         mood = "很开心" if self.happy > 0.75 else "挺开心" if self.happy > 0.55 else "有点闷" if self.happy > 0.35 else "不太开心"
         tired = "精神很好" if self.energy > 0.6 else "有点困" if self.energy > 0.3 else "很困"
         lines = [f"- 心情：{mood}，{tired}" + ("，正在打盹" if self.napping else "")]
@@ -175,7 +190,7 @@ class Life:
                 "viewer_room": self.nav.room_at(*self.viewer[:2]) if self.nav is not None and self.viewer else None,
                 "path": [[round(x, 2), round(y, 2)] for x, y in self.path] if self.path else None}
 
-    # ── 主循环 ──────────────────────────────────────────────────────────────
+    # ── Main loop ──────────────────────────────────────────────────────────────
 
     def _run(self) -> None:
         while True:
@@ -183,7 +198,7 @@ class Life:
             try:
                 self._tick()
             except (DuckError, OSError, ValueError, KeyError):
-                pass  # 仿真没开或重启中：下一拍再试，不影响聊天
+                pass  # the duck is down or restarting: try next tick; chat is unaffected
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -214,14 +229,14 @@ class Life:
         return self._state
 
     def _update_mood(self, now: float, present: bool) -> None:
-        # 开心慢慢回到 0.5；陪着你时精力恢复，没人理时慢慢变困
+        # Happiness drifts back to 0.5; energy recovers with you around and drains when ignored
         self.happy += (0.5 - self.happy) * 0.002
         if self._with_you(now, present):
             self.energy = min(1.0, self.energy + 0.002)
         else:
             self.energy = max(0.0, self.energy - 0.0006)
 
-    # ── 行为 ────────────────────────────────────────────────────────────────
+    # ── Behaviours ────────────────────────────────────────────────────────────────
 
     def _get_up(self, now: float) -> None:
         if self._ready("get_up", now, 6.0):
@@ -230,7 +245,7 @@ class Life:
             self.napping = False
 
     def _presence(self, now: float, present: bool) -> None:
-        """摄像头开着时：你离开会找你，回来会高兴。"""
+        """With the camera on: look for you when you leave, be glad when you are back."""
         if present:
             if self.away_since is not None and now - self.away_since > AWAY_AFTER_S:
                 steps = ([Step("stand_up", {})] if self.napping else []) + [Step("make_sound", {"kind": "greet"}), Step("face_me", {})]
@@ -253,8 +268,8 @@ class Life:
                      "🔍 主人去哪了", now)
 
     def _react(self, now: float, seen) -> None:
-        """对摄像头里的你做出反应：被摸、被吓到、你凑近看它。"""
-        # 吓一跳：手飞快地挥过
+        """React to you in the camera: petting, being startled, you leaning in."""
+        # Startled: a hand swiping past fast
         if seen.kind == "hand" and seen.speed > STARTLE_SPEED and seen.size > 0.15 and self._ready("startle", now, 6.0):
             self.duck.sound("alarm")
             self._express(pitch=-0.2, seconds=0.9)
@@ -262,7 +277,7 @@ class Life:
             self._event("😳 吓我一跳", now)
             self._remember("主人的手突然挥过来，吓了一跳")
             return
-        # 被摸：手很近、慢慢地动
+        # Petted: a hand very close, moving slowly
         petting = seen.kind == "hand" and seen.size > PET_SIZE and PET_SPEED[0] < seen.speed < PET_SPEED[1]
         if petting:
             self._pet_since = self._pet_since or now
@@ -275,7 +290,7 @@ class Life:
                 self._remember("主人在摸我")
         else:
             self._pet_since = None
-        # 好奇：你的脸 1 秒内明显变大（凑近镜头看它）
+        # Curious: your face clearly bigger within 1 s (leaning in to the camera)
         if seen.kind == "face":
             self._face_sizes.append((now, seen.size))
             old = [s for t, s in self._face_sizes if now - t > 0.8]
@@ -289,11 +304,11 @@ class Life:
             self._face_sizes.clear()
 
     def _autonomy(self, now: float, present: bool, camera: bool, policy: str | None) -> None:
-        """鸭子空闲时自己找事做。"""
+        """The duck's own ideas while it is idle."""
         with_you = self._with_you(now, present)
         where = self.where_is_viewer()
 
-        # 你在它侧后方：转过来面对你
+        # You are behind its shoulder: turn to face you
         if with_you and where and not self.napping and policy != "sit" and where[1] > FACE_YOU_MIN_M:
             if abs(where[0]) > math.radians(FACE_YOU_DEG):
                 self._behind_since = self._behind_since or now
@@ -317,7 +332,7 @@ class Life:
             self._wander(now, where, policy)
 
     def _companion(self, now: float, where) -> None:
-        """陪着你：偶尔撒个娇，你离太远就凑过去。"""
+        """With you: nuzzle up now and then, come closer if you are far."""
         if where and where[1] > 1.8 and self.energy > 0.3:
             self._do([Step("come_here", {})], "🐥 凑过来", now)
             return
@@ -326,12 +341,12 @@ class Life:
             self.duck.sound("chirp")
             self.tilt_head(1.5)
         elif choice < 0.7:
-            self._express(pitch=0.12, seconds=0.6)  # 点点头
+            self._express(pitch=0.12, seconds=0.6)  # a little nod
         else:
             self.duck.sound("coo")
 
     def _wander(self, now: float, where, policy: str | None) -> None:
-        """没人理：自己溜达，但不走太远。"""
+        """Ignored: wander about, but not far."""
         if self.napping:
             return
         if policy == "sit":
@@ -342,14 +357,14 @@ class Life:
             spot = self._wander_spot()
             if spot:
                 self._do([Step("wander_to", {"x": spot[0], "y": spot[1]})], None, now)
-            elif self.nav is None:  # 开阔空地：随便走走、转转
+            elif self.nav is None:  # an open floor: stroll and turn at random
                 self._do([Step("walk_forward", {"seconds": round(random.uniform(1.5, 3.5), 1)})] if choice < 0.4 else
                          [Step("turn", {"direction": random.choice(("left", "right")), "degrees": random.choice((45, 90, 120))})], None, now)
         else:
             self.duck.sound(random.choice(("chirp", "inquire")))
 
     def _wander_spot(self) -> tuple[float, float] | None:
-        """有地图时：同一个房间里随便挑一个能走的点（不会走去撞墙、掉进楼梯井）。"""
+        """With a map: any walkable spot in the same room (never into a wall or down the stairwell)."""
         if self.nav is None:
             return None
         x, y, _ = self.duck_pose()
@@ -369,9 +384,9 @@ class Life:
                      "😴 回窝打个盹" if home else "😴 打个盹", now)
             self._remember("没人陪，" + ("回到窝里" if home else "") + "坐下打了个盹")
         elif policy == "sit" and random.random() < 0.5:
-            self.duck.sound("coo")  # 睡梦里咕一声
+            self.duck.sound("coo")  # a coo in its sleep
 
-    # ── 头和身体的表情 ──────────────────────────────────────────────────────
+    # ── Head and body expressions ──────────────────────────────────────────────────────
 
     def _head(self, now: float, seen, present: bool) -> None:
         current = self.runner.current
@@ -380,21 +395,21 @@ class Life:
         with_you = self._with_you(now, present) or self._speaking
         tilt = now < self._tilt_until
         if not (with_you or tilt) or self.napping:
-            return  # 交还给 robotd 自己东张西望
+            return  # hand back to robotd's own idle look-around
         if now - self._last_look < LOOK_MIN_S:
             return
         self._last_look = now
 
         target = self._gaze_target(seen if present else None)
         head = self.duck.request("robot.look", {"x": target[0], "y": target[1], "z": target[2]}, timeout=1.0)["head"]
-        if self._speaking:  # 说话时点头。头约 220 ms 才转过一半，太快（3.5 Hz）会被抹平看不出来
+        if self._speaking:  # nod while talking. The head takes ~220 ms to get halfway, so faster (3.5 Hz) smears out
             head["head_pitch"] += TALK_BOB_RAD * math.sin(2 * math.pi * TALK_BOB_HZ * now)
-        if tilt:  # 歪头
+        if tilt:  # tilt
             head["head_roll"] += 0.28 * self._tilt_dir
         self.duck.hold_head(head, 0.5)
 
     def _gaze_target(self, seen) -> tuple[float, float, float]:
-        """看向你（3D 世界里的位置），再按摄像头里手/脸的位置微调。躯干坐标系，米。"""
+        """Look at you (your place in the 3D world), fine-tuned by your hand/face in the camera. Trunk frame, m."""
         where = self.where_is_viewer()
         if where is None:
             base = (0.5, 0.0, 0.05)
@@ -407,29 +422,29 @@ class Life:
             base = (distance * math.cos(bearing), distance * math.sin(bearing), height)
         if seen is None:
             return base
-        # 你面对着它：你的右手边是它的左边。偏移量和距离成比例，垂直于视线
+        # You face it: your right is its left. The offset scales with distance, perpendicular to the line of sight
         norm = math.hypot(base[0], base[1]) or 1.0
         left = (-base[1] / norm, base[0] / norm)
         side = seen.x * 0.4 * distance
         return (base[0] + left[0] * side, base[1] + left[1] * side, base[2] + seen.y * 0.3 * distance)
 
     def _body_pose(self, now: float, policy: str | None, idle: bool) -> None:
-        """前倾/后仰/歪身的表情，只在站着不动时做；做完摆正。"""
+        """Leaning forward/back/sideways as expression, only while standing still; level again afterwards."""
         if now < self._pose_until and policy == "stand" and idle:
             pitch, roll = self._pose
             self.duck.hold_pose(pitch=pitch, roll=roll, seconds=0.3)
             self._glide_until = now + 0.6
         elif self._glide_until is not None:
             if now < self._glide_until and idle:
-                self.duck.hold_pose(0.0, 0.0, seconds=0.3)  # 先慢慢摆正
+                self.duck.hold_pose(0.0, 0.0, seconds=0.3)  # glide back level first
             else:
-                self.duck.release_pose()  # 再退出摆姿势模式，否则不会走路
+                self.duck.release_pose()  # then leave posing mode, or it will not walk
                 self._glide_until = None
 
     def _express(self, pitch: float = 0.0, roll: float = 0.0, seconds: float = 1.0) -> None:
         self._pose, self._pose_until = (pitch, roll), time.monotonic() + seconds
 
-    # ── 小工具 ──────────────────────────────────────────────────────────────
+    # ── Helpers ──────────────────────────────────────────────────────────────
 
     def _interact(self) -> None:
         self.last_interaction = time.monotonic()
@@ -440,6 +455,10 @@ class Life:
             self._remember("被主人叫醒了")
 
     def _do(self, steps: list[Step], label: str | None, now: float, preempt: bool = False) -> None:
+        if not self.roam:
+            steps = [step for step in steps if step.name not in LOCOMOTION]
+            if not steps:
+                return
         for step in steps:
             step.source = "life"
         if preempt and self.runner.current_source == "life":
@@ -449,7 +468,7 @@ class Life:
             self._event(label, now)
 
     def _event(self, text: str, now: float) -> None:
-        self.tracker.event(text)  # 页面会弹出提示
+        self.tracker.event(text)  # the page shows a toast
 
     def _remember(self, text: str) -> None:
         self.memory.append((time.monotonic(), text))

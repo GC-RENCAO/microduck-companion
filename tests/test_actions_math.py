@@ -1,7 +1,5 @@
 """Unit conversion and path-following geometry: no duck, no simulator."""
 
-import math
-
 import pytest
 
 from actions import (MAX_WALK_S, MIN_WALK_S, STEPS_PER_S, TURN_DEG_PER_S, WALK_SPEED_MPS, _distance_to_path,

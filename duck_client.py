@@ -1,67 +1,49 @@
-"""robotd 的 JSON-RPC 客户端：通过 Unix socket 给仿真鸭子发意图（intent）。
+"""The duck's body as the rest of duck-chat sees it: intents out, robot.state in, over any transport.
 
-协议要点（来自 microduck 的 duck-ipc-proto）：
-- 每行一个 JSON-RPC 2.0 对象，不需要握手。
-- robot.move / robot.head 是“持续意图”：以通知形式（无 id）10 Hz 左右重复发送，
-  robotd 在停发 500 ms 后自动归零——所以“走 3 秒”= 连续发 3 秒。
-- robot.do / robot.look / robot.sound / robot.enable 是“离散意图”：带 id 的请求，有应答。
+Protocol (microduck's duck-ipc-proto):
+- robot.move / robot.head / robot.pose are continuous intents: notifications (no id) repeated while they
+  hold, which robotd zeroes 500 ms after the last one — so “walk 3 s” means sending for 3 s.
+- robot.do / robot.look / robot.sound / robot.enable are discrete: requests with an id and an answer.
+- robot.subscribe streams robot.state: policy, safety, joints, odometry, IMU.
+
+How often an intent is repeated and how fast state is asked for come from the transport (transport.py):
+10 Hz on a local socket, ~3 Hz through the rendezvous, whose rate limit is shared by everything.
 """
 
 from __future__ import annotations
 
-import itertools
-import json
-import os
-import socket
 import threading
 import time
-from pathlib import Path
+from typing import Callable
 
-DEFAULT_SOCKET = Path(os.environ.get("DUCK_SIM_STATE", Path.home() / ".cache" / "duck-sim")) / "duck.sock"
+from transport import DEFAULT_SOCKET, DuckError, Transport, UnixTransport  # noqa: F401 — DuckError is re-exported
 
-# 持续意图的重发间隔。robotd 的失效时间是 500 ms，10 Hz 留足余量（与 duck-sim drive 一致）。
-RESEND_S = 0.1
-
-
-class DuckError(RuntimeError):
-    pass
+STATE_STALE_S = 2.0  # a robot.state older than this is not the robot's state any more
 
 
 class DuckClient:
-    def __init__(self, socket_path: Path | str = DEFAULT_SOCKET):
-        self.socket_path = str(socket_path)
-        self._ids = itertools.count(1)
+    def __init__(self, link: Transport | None = None):
+        self.link = link or UnixTransport(DEFAULT_SOCKET)
         self._motion_lock = threading.Lock()
-        # 当前持续意图，按方法分通道：{"robot.move": (params, 截止时间), "robot.head": (...)}。
-        # 走路和转头互不覆盖——摄像头跟踪转头时，走路照常进行。
+        # The current continuous intents, one channel per method: {"robot.move": (params, until), ...}.
+        # Walking and head turns never overwrite each other — the head tracks you while the duck walks.
         self._intents: dict[str, tuple[dict, float]] = {}
-        # robot.pose 的 active=true 会让鸭子进入“摆姿势”模式，而且意图过期后仍停在这个模式里，
-        # 这时它不响应走路（实测：直接走 3 秒位移 0，发 active=false 后走 3 秒 0.36 米）。
-        # 所以记住是否摆过姿势，走路/做技能前先退出。
+        # robot.pose with active=true puts the duck in a posing mode that outlives the intent, and in it
+        # the duck will not walk (in the sim: 0 m in 3 s, 0.36 m after active=false). So remember
+        # whether we posed, and leave the mode before walking or a skill.
         self._posing = False
         self._wake = threading.Event()
+        self._state: dict | None = None
+        self._state_at = 0.0
+        self._state_cond = threading.Condition()
+        self._state_listeners: list[Callable[[dict], None]] = []
         threading.Thread(target=self._motion_loop, name="duck-motion", daemon=True).start()
+        threading.Thread(target=self._state_loop, name="duck-state", daemon=True).start()
 
-    # ── 离散意图 ────────────────────────────────────────────────────────────
+    # ── Discrete intents ────────────────────────────────────────────────────
 
     def request(self, method: str, params: dict | None = None, timeout: float = 5.0) -> dict:
-        """发一个请求并等应答。每次新开连接：请求频率很低，这样最简单也最不容易卡住。"""
-        message = {"jsonrpc": "2.0", "id": next(self._ids), "method": method}
-        if params is not None:
-            message["params"] = params
-        with socket.socket(socket.AF_UNIX) as conn:
-            conn.settimeout(timeout)
-            try:
-                conn.connect(self.socket_path)
-            except OSError as error:
-                raise DuckError(f"连不上鸭子（{self.socket_path}）：先运行 scripts/duck-sim") from error
-            reader = conn.makefile("rw")
-            reader.write(json.dumps(message) + "\n")
-            reader.flush()
-            answer = json.loads(reader.readline())
-        if "error" in answer:
-            raise DuckError(answer["error"].get("message", str(answer["error"])))
-        return answer.get("result", {})
+        return self.link.request(method, params, timeout)
 
     def do(self, skill: str) -> dict:
         self.release_pose()
@@ -74,48 +56,52 @@ class DuckClient:
         return self.request("robot.enable", {"on": True})
 
     def look(self, x: float, y: float, z: float, hold_s: float = 3.0) -> dict:
-        """看向躯干坐标系里的一个点，并保持 hold_s 秒。
+        """Look at a point in the trunk frame and hold it for hold_s.
 
-        robot.look 只发一次的话，头会很快被 idle look-around 接管；应答里的关节角
-        通过 robot.head（持续意图）重发，才能“盯住”。
+        A single robot.look is soon taken over by the idle look-around; resending the joint angles it
+        answers with as robot.head (a continuous intent) is what makes the gaze stick.
         """
         result = self.request("robot.look", {"x": x, "y": y, "z": z})
         self.hold_head(result["head"], hold_s)
         return result
 
-    # ── 持续意图 ────────────────────────────────────────────────────────────
+    # ── Continuous intents ──────────────────────────────────────────────────
 
     def move(self, vx: float, vyaw: float = 0.0, seconds: float = 3.0) -> None:
-        """以给定速度走 seconds 秒，立即返回；新的 move/stop 会覆盖它。"""
+        """Walk at this velocity for `seconds` and return at once; a newer move/stop replaces it."""
         if vx or vyaw:
             self.release_pose()
         self._set_intent("robot.move", {"vx": vx, "vy": 0.0, "vyaw": vyaw}, seconds)
 
     def stop(self) -> None:
-        self._set_intent("robot.move", {"vx": 0.0, "vy": 0.0, "vyaw": 0.0}, RESEND_S * 3)
+        self._set_intent("robot.move", {"vx": 0.0, "vy": 0.0, "vyaw": 0.0}, self.link.resend_s * 3)
 
     def hold_head(self, head: dict, seconds: float) -> None:
-        """把头保持在给定关节角 seconds 秒（robot.head）。新的目标立即发出，不等下一拍。"""
+        """Hold the head at these joint angles for `seconds` (robot.head). A new target goes out at once."""
         self._set_intent("robot.head", head, seconds)
 
     def hold_pose(self, pitch: float = 0.0, roll: float = 0.0, seconds: float = 1.0) -> None:
-        """站立时的身体姿态（robot.pose）：pitch 正 = 前倾，roll 正 = 向右歪。
+        """Body posture while standing (robot.pose): pitch positive = lean forward, roll positive = tilt right.
 
-        训练范围 ±0.26 rad，robotd 不截断，超出会让策略收到没见过的输入，所以这里截断。
-        仿真实测：pitch/roll ±0.2 效果明显；z（下蹲）几乎看不出，所以不提供。
+        Trained on ±0.26 rad and robotd does not clamp, so clamping here keeps the policy on inputs it has
+        seen. In the sim ±0.2 pitch/roll reads clearly; z (crouch) barely shows, so it is not offered.
         """
+        if self.moving():
+            # Posing mode stops the walk, and an expression that raced a walk command (life decides it
+            # was idle a tick before the walk began) must not win. The walk always does.
+            return
         limit = 0.24
         params = {"z": 0.0, "pitch": max(-limit, min(limit, pitch)), "roll": max(-limit, min(limit, roll)), "active": True}
         self._posing = True
         self._set_intent("robot.pose", params, seconds)
 
     def release_pose(self, force: bool = False) -> None:
-        """退出摆姿势模式（身体立刻回到正常姿态），否则鸭子不会走路。
-        没摆过姿势就什么都不做；force=True 时总是发（启动时清掉上次运行留下的状态）。"""
+        """Leave posing mode (the body returns to normal at once), or the duck will not walk.
+        Does nothing if we never posed; force=True always sends (clearing a previous run's state at startup)."""
         if not self._posing and not force:
             return
         self._posing = False
-        self._set_intent("robot.pose", {"z": 0.0, "pitch": 0.0, "roll": 0.0, "active": False}, RESEND_S * 3)
+        self._set_intent("robot.pose", {"z": 0.0, "pitch": 0.0, "roll": 0.0, "active": False}, self.link.resend_s * 3)
 
     def moving(self) -> bool:
         with self._motion_lock:
@@ -128,7 +114,7 @@ class DuckClient:
         self._wake.set()
 
     def _motion_loop(self) -> None:
-        writer = None
+        sent: dict[str, tuple[float, dict]] = {}  # per channel: when, and what, was last sent
         while True:
             now = time.monotonic()
             with self._motion_lock:
@@ -138,35 +124,51 @@ class DuckClient:
                 self._wake.wait()
                 self._wake.clear()
                 continue
-            try:
-                if writer is None:
-                    conn = socket.socket(socket.AF_UNIX)
-                    conn.connect(self.socket_path)
-                    writer = conn.makefile("w")
-                for method, params in active:
-                    writer.write(json.dumps({"jsonrpc": "2.0", "method": method, "params": params}) + "\n")
-                writer.flush()
-            except OSError:
-                # 鸭子重启或没开：丢掉这些意图，下次重新连。持续意图本来就允许丢。
-                writer = None
-                with self._motion_lock:
-                    self._intents.clear()
-                continue
-            # 每 RESEND_S 重发一次；有新目标（比如摄像头跟踪更新了头的方向）就提前醒来立刻发
-            self._wake.wait(RESEND_S)
+            # Each channel is resent at the transport's cadence. A *changed* target may go sooner — but
+            # not sooner than half of it: the camera retargets the gaze 20 times a second, which a
+            # rate-limited lane cannot carry, and a newer target simply replaces the one waiting.
+            period = self.link.resend_s
+            for method, params in active:
+                at, last = sent.get(method, (0.0, None))
+                if now - at < (period * 0.5 if params != last else period):
+                    continue
+                try:
+                    self.link.notify(method, params)
+                    sent[method] = (now, params)
+                except DuckError:
+                    # The duck restarted, is off, or the lane is throttled. Intents are allowed to be lost;
+                    # the move/head that wanted this will resend or time out on its own.
+                    pass
+            self._wake.wait(period * 0.5)
             self._wake.clear()
 
-    # ── 状态 ────────────────────────────────────────────────────────────────
+    # ── State ───────────────────────────────────────────────────────────────
 
-    def state(self) -> dict:
-        """读一帧 robot.state：policy（stand/walk/sit/…）、safety（fallen 等）。"""
-        with socket.socket(socket.AF_UNIX) as conn:
-            conn.settimeout(3)
-            conn.connect(self.socket_path)
-            reader = conn.makefile("rw")
-            reader.write(json.dumps({"jsonrpc": "2.0", "id": 0, "method": "robot.subscribe", "params": {"hz": 10}}) + "\n")
-            reader.flush()
-            ack = json.loads(reader.readline())
-            if "error" in ack:
-                raise DuckError(ack["error"].get("message"))
-            return json.loads(reader.readline()).get("params", {})
+    def on_state(self, listener: Callable[[dict], None]) -> None:
+        """Call `listener(frame)` for every robot.state frame (pose.py draws the real robot from them)."""
+        self._state_listeners.append(listener)
+
+    def state(self, timeout: float = 3.0) -> dict:
+        """The latest robot.state: policy (stand/walk/sit/…), safety (fallen, …), joints, odom, imu."""
+        with self._state_cond:
+            fresh = lambda: self._state is not None and time.monotonic() - self._state_at < STATE_STALE_S
+            if not self._state_cond.wait_for(fresh, timeout=timeout):
+                raise DuckError("读不到鸭子的状态（它没开，或者连接断了）")
+            return self._state
+
+    def _state_loop(self) -> None:
+        """One subscription for the life of the program, resubscribing whenever it drops."""
+        reported = None
+        while True:
+            try:
+                for frame in self.link.subscribe("robot.subscribe", {"hz": self.link.state_hz}):
+                    with self._state_cond:
+                        self._state, self._state_at = frame, time.monotonic()
+                        self._state_cond.notify_all()
+                    for listener in self._state_listeners:
+                        listener(frame)
+            except DuckError as error:
+                if str(error) != reported:  # say why once, not every second
+                    reported = str(error)
+                    print(f"⚠️ 读不到鸭子的状态：{error}", flush=True)
+            time.sleep(1.0)

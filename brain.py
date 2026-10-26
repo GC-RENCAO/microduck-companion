@@ -50,6 +50,10 @@ PLANNER = """你是一只双足机器鸭子的身体控制器。根据主人最�
 - turn：“左转/右转”没说角度就是 90 度；掉头 / turn around 是 180；转一圈 / spin / 转圈 是 360。
 - 正文不需要写话（另有人负责说话），写“好”或留空即可。"""
 
+SIM_BODY = "- 现在你住在主人电脑里的 3D 物理仿真世界（MuJoCo）里，脚下是一大片蓝色棋盘地板。主人在屏幕旁边打字和你说话。"
+REAL_BODY = ("- 现在你是一只真实的机器鸭子，就在主人身边；主人在电脑上打字和你说话，屏幕上的 3D 小鸭子是你身体此刻的样子。"
+             "你看不见主人在房间的哪个位置，也不会自己到处乱走（可能在桌子上），主人让你走你才走。")
+
 PERSONA = """你是「小鸭子」，一只真正有自己想法的小机器鸭子。
 
 关于你自己：
@@ -148,8 +152,10 @@ class Thought:
 
 
 class Brain:
-    def __init__(self, runner: ActionQueue, describe=None, places: list[str] | None = None):
+    def __init__(self, runner: ActionQueue, describe=None, places: list[str] | None = None, real: bool = False):
         self.runner = runner
+        # A real robot is not in the simulated world the persona describes
+        self.persona = PERSONA.replace(SIM_BODY, REAL_BODY) if real else PERSONA
         self.describe = describe or (lambda: [])  # life.Life.describe: mood, where you are, recent events
         # With a house map there is a go_to tool whose places come from the map (works for any house)
         self.tools = TOOLS + ([{"type": "function", "function": {
@@ -260,7 +266,7 @@ class Brain:
         user = {"role": "user", "content": f"{text}\n\n{note}"}
         if image_b64:
             user["images"] = [image_b64]
-        system = PERSONA + "\n\n" + self._body_state(facts)
+        system = self.persona + "\n\n" + self._body_state(facts)
         messages = [{"role": "system", "content": system}, *self.talk_history, user]
         started = time.perf_counter()
         pieces = []

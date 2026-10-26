@@ -1,23 +1,29 @@
-"""鸭子屏幕：浏览器里看 3D 鸭子、打字和它互动。
+"""The duck screen: the 3D duck in the browser, and typing to it.
 
-    ./run.sh            然后打开 http://127.0.0.1:8765
+    ./run.sh            then open http://127.0.0.1:8765
 
-GET  /                页面（three.js 在浏览器里渲染 3D）
-GET  /api/scene      零件清单与网格索引（JSON，只取一次）
-GET  /api/meshes.bin 网格数据（float32 顶点 + uint32 三角面，只取一次）
-GET  /api/tex/<n>.png 场景贴图（地板、墙面花纹），场景清单里按编号引用
-GET  /api/pose       姿态流：每帧 = uint32 长度 + [float64 仿真时间, 每零件 12×float32]
-POST /api/say        {"text": "...", "image": 可选 base64 JPEG} → NDJSON 事件流，每行一个：
-                     {"type":"act","steps","act_ms"} 身体开始动 → {"type":"delta","text"} 回话片段…
-                     → {"type":"done","brain","ok","timings_ms"}
-POST /api/track      摄像头识别结果 {"kind":"hand|face|none","x","y","size","gesture"} → {"event","event_id"}，
-                     浏览器每秒约 20 次（tracker.py 感知 + 手势，不经过大模型）
-POST /api/viewer     3D 视角（相机）的位置 {"x","y","z"}：这就是“你”在鸭子世界里的位置（life.py）
-GET  /api/calibration   真实摄像头下各手势的手指特征统计（对照 tracker.py 的阈值调）；POST 清空重新统计
-GET  /api/status     鸭子是否在线、当前 policy、是否摔倒、正在做的动作、大模型是否可用、心情
+GET  /                the page (three.js renders the 3D in the browser)
+GET  /api/scene       parts and mesh index, plus the world and known places (JSON, fetched once)
+GET  /api/meshes.bin  mesh data (float32 vertices + uint32 triangles, fetched once)
+GET  /api/tex/<n>.png scene textures (floors, wall patterns), referenced by number in the scene
+GET  /api/pose        pose stream: each frame = uint32 length + [float64 time, 12×float32 per part]
+POST /api/say         {"text": "...", "image": optional base64 JPEG} → NDJSON events, one per line:
+                      {"type":"act","steps","act_ms"} the body starts → {"type":"delta","text"} reply chunks…
+                      → {"type":"done","brain","ok","timings_ms"}
+POST /api/track       camera results {"kind":"hand|face|none","x","y","size","gesture"} → {"event","event_id"},
+                      about 20 a second from the browser (tracker.py perception + gestures, no LLM)
+POST /api/viewer      where the 3D view's camera is {"x","y","z"}: that is “you” in the duck's world (life.py)
+GET  /api/calibration finger feature statistics per gesture from the real camera (for tracker.py's thresholds); POST resets
+GET  /api/status      online?, policy, fallen?, current action, LLM ready?, mood, world and link
 
-DUCK_BRAIN=llm（默认）：先交给大模型（brain.py）；Ollama 不可用或出错时退回关键词模式，
-回复里标明“规则模式”。DUCK_BRAIN=rules：只用关键词模式。
+DUCK_BRAIN=llm (default): the LLM first (brain.py), falling back to keyword mode — and saying so in the
+reply — when Ollama is unavailable or fails. DUCK_BRAIN=rules: keyword mode only.
+
+DUCK_TRANSPORT=unix (default) / rendezvous: how to reach the duck (transport.py).
+DUCK_WORLD=sim / robot: where the duck's position and 3D pose come from — the simulator's ground truth,
+or the joints and odometry the robot reports itself (pose.py). Defaults to sim over unix and robot over
+the rendezvous. In robot mode there is no house map and the duck does not walk on its own (DUCK_ROAM=1
+allows it).
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ from actions import ActionQueue, Actions
 from brain import Brain, BrainError
 from life import Life
 from navmap import NavMap
+import transport
 from duck_client import DuckClient, DuckError
 from pose import PoseSource
 from tracker import Tracker
@@ -44,19 +51,30 @@ PORT = int(os.environ.get("DUCK_CHAT_PORT", "8765"))
 USE_LLM = os.environ.get("DUCK_BRAIN", "llm") != "rules"
 PAGE = Path(__file__).with_name("static") / "index.html"
 
-duck = DuckClient()
+try:
+    link = transport.from_env()
+except DuckError as error:
+    sys.exit(f"❌ {error}")
+WORLD = os.environ.get("DUCK_WORLD") or ("sim" if link.name == "unix" else "robot")
+REAL = WORLD == "robot"
+duck = DuckClient(link)
 runner = ActionQueue(Actions(duck))
 tracker = Tracker(runner)
-pose = PoseSource()
-try:
-    nav = NavMap(pose.model, pose.moving_bodies)
-    print(f"🗺️ 地图：{len(nav.rooms)} 个房间、{len(nav.places)} 个地点", flush=True)
-except ValueError as reason:  # 开阔空地：不需要地图，直接朝目标走
-    nav = None
-    print(f"🗺️ 没有地图：{reason}", flush=True)
-life = Life(runner, tracker, pose, nav)
-brain = Brain(runner, life.describe, list(nav.places) if nav else None)
-SCENE_JSON = json.dumps(pose.scene).encode()
+pose = PoseSource(WORLD, duck)
+nav = None
+if REAL:
+    print(f"🦆 真机模式（{link.name}）：姿态来自机器人自己的关节和里程计，没有房子地图，不会自己走动", flush=True)
+else:
+    try:
+        nav = NavMap(pose.model, pose.moving_bodies)
+        print(f"🗺️ 地图：{len(nav.rooms)} 个房间、{len(nav.places)} 个地点", flush=True)
+    except ValueError as reason:  # an open floor: no map needed, head straight for goals
+        print(f"🗺️ 没有地图：{reason}", flush=True)
+roam = os.environ.get("DUCK_ROAM")
+life = Life(runner, tracker, pose, nav, real=REAL, roam=None if roam is None else roam == "1")
+brain = Brain(runner, life.describe, list(nav.places) if nav else None, real=REAL)
+# What the page builds once: the parts, plus which world it is and the places the duck knows (for the chips)
+SCENE_JSON = json.dumps({**pose.scene, "world": WORLD, "places": list(nav.places) if nav else []}).encode()
 
 
 STOP_WORDS = ("停", "stop", "别动", "站住", "不要动")
@@ -70,9 +88,9 @@ def _rules(text: str, note: str = ""):
 
 
 def say(text: str, image: str | None):
-    """产出 act → delta… → done 事件。"""
+    """Yields act → delta… → done events."""
     life.on_chat(text)
-    # “停”不等大模型：安全相关，必须立刻生效
+    # “Stop” does not wait for the LLM: it is about safety and must act at once
     if any(word in text.lower() for word in STOP_WORDS):
         runner.cancel()
         yield {"type": "act", "steps": [{"name": "stop", "args": {}}], "act_ms": 0}
@@ -89,16 +107,16 @@ def say(text: str, image: str | None):
                 acted = True
                 yield event
             elif event["type"] == "delta":
-                life.speaking(True)  # 说话时轻轻点头
+                life.speaking(True)  # nod gently while talking
                 yield event
             else:
                 thought = event["thought"]
                 yield {"type": "done", "brain": brain_module.MODEL, "ok": True, "action": "llm",
                        "timings_ms": thought.timings_ms}
     except BrainError as error:
-        if not acted:  # 身体还没决定就失败：整句交给关键词模式
+        if not acted:  # failed before the body decided: keyword mode takes the whole sentence
             yield from _rules(text, str(error))
-        else:  # 已经开始动了，只是话没说完
+        else:  # already moving, only the words were cut short
             yield {"type": "delta", "text": f"\n（回话出错：{error}）"}
             yield {"type": "done", "brain": brain_module.MODEL, "ok": False, "action": "llm"}
     finally:
@@ -106,10 +124,10 @@ def say(text: str, image: str | None):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):  # 姿态流是长连接，不打访问日志
+    def log_message(self, fmt, *args):  # the pose stream is long-lived; no access log
         pass
 
-    # ── 工具 ────────────────────────────────────────────────────────────────
+    # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode()
@@ -134,7 +152,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return {}
 
-    # ── 路由 ────────────────────────────────────────────────────────────────
+    # ── Routes ────────────────────────────────────────────────────────────────
 
     def do_GET(self) -> None:
         self.path = self.path.split("?", 1)[0]
@@ -186,19 +204,20 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write((json.dumps(event, ensure_ascii=False) + "\n").encode())
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
-                pass  # 页面关了：动作照常执行，话不用再说
+                pass  # the page closed: actions carry on, the words need not
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
     def _status(self) -> None:
         payload = {
             "body": pose.connected, "robot": False, "busy": runner.busy(), "current": runner.current,
+            "world": WORLD, "link": link.describe(),
             "brain": brain_module.MODEL if USE_LLM else "rules", "brain_ready": USE_LLM and brain.available(),
             "life": life.status(),
-            "done": runner.log[-3:],  # 最近几个动作的结果（比如“去窝：卡住了，过不去”）
+            "done": runner.log[-3:],  # the last few actions' results (e.g. “to the dock: stuck, cannot get through”)
         }
         try:
-            state = duck.state()
+            state = duck.state(timeout=0)
             payload.update(
                 robot=True,
                 policy=state.get("policy"),
@@ -222,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(len(frame).to_bytes(4, "little") + frame)
                     self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
-            pass  # 浏览器关了标签页
+            pass  # the browser closed the tab
 
 
 def main() -> None:
