@@ -87,7 +87,7 @@ It is a working take on what microduck's roadmap calls **M9 — the autonomous b
 
 `patches/microduck_rl-objects-op.patch` adds a read-only `objects` op to the simulator so a viewer can mirror balls and
 boxes. `setup.sh` applies it if needed; without it those objects just stay where they started.
-It is proposed upstream in pollen-robotics/microduck_rl.
+It is proposed upstream in [pollen-robotics/microduck_rl#83](https://github.com/pollen-robotics/microduck_rl/pull/83).
 
 ## License and credits
 

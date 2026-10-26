@@ -51,7 +51,7 @@ cd ../duck-chat && DUCK_SIM_SCENE=apartment ./run.sh
 - **挡住鸭子的墙自动变透明**：每帧从相机向鸭子打一条射线，挡在中间的墙淡成 15% 不透明度。
 - **会动的东西实时跟上**：球和箱子的位置每帧推给浏览器。这需要仿真提供它们的姿态——鸭子自己的 `read`
   只给机器人能感知的东西，所以**本地给 `microduck_rl/src/mjlab_microduck/sim/body_server.py` 加了一个只读的
-  `objects` 接口**（17 行，`git -C ../microduck_rl diff` 可以看到；没推送任何地方）。没有这个接口时，
+  `objects` 接口**（17 行，补丁在 `patches/`，`setup.sh` 会自动打上；已向官方提交 [microduck_rl#83](https://github.com/pollen-robotics/microduck_rl/pull/83)）。没有这个接口时，
   会动的东西停在初始位置，不会报错。
 - 墙是实心的（碰撞属性和鸭子一致）：鸭子会被挡住，但一直顶着墙走会摔倒（摔倒后会自己爬起来）。
 
